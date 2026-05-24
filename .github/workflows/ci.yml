@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  build-test-pack:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore MapperForge.sln
+
+      - name: Build
+        run: dotnet build MapperForge.sln --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test MapperForge.sln --configuration Release --no-build --verbosity normal
+
+      - name: Pack
+        run: dotnet pack src/MapperForge/MapperForge.csproj --configuration Release --no-build --output artifacts/packages
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: mapperforge-packages
+          path: artifacts/packages/*.nupkg

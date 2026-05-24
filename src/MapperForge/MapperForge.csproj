@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>12.0</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+    <PackageId>MapperForge</PackageId>
+    <Title>MapperForge</Title>
+    <Description>Compile-time object mapping for .NET with zero runtime reflection.</Description>
+    <PackageTags>mapper;mapping;source-generator;roslyn;performance;ddd;clean-architecture</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/your-org/mapperforge</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/your-org/mapperforge</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <Authors>MapperForge Contributors</Authors>
+    <Company>MapperForge</Company>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <NoWarn>$(NoWarn);CS9057</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MapperForge.Generator\MapperForge.Generator.csproj"
+                      OutputItemType="Analyzer"
+                      ReferenceOutputAssembly="false"
+                      PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\LICENSE" Pack="true" PackagePath="\" />
+    <None Include="..\MapperForge.Generator\bin\$(Configuration)\netstandard2.0\MapperForge.Generator.dll"
+          Pack="true"
+          PackagePath="analyzers/dotnet/cs"
+          Visible="false"
+          Condition="Exists('..\MapperForge.Generator\bin\$(Configuration)\netstandard2.0\MapperForge.Generator.dll')" />
+  </ItemGroup>
+</Project>
