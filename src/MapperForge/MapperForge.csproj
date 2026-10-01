@@ -17,6 +17,7 @@
     <Company>MapperForge</Company>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <NoWarn>$(NoWarn);CS9057</NoWarn>
+    <TargetsForTfmSpecificContentInPackage>$(TargetsForTfmSpecificContentInPackage);IncludeMapperForgeGenerator</TargetsForTfmSpecificContentInPackage>
   </PropertyGroup>
 
   <ItemGroup>
@@ -29,10 +30,18 @@
   <ItemGroup>
     <None Include="..\..\README.md" Pack="true" PackagePath="\" />
     <None Include="..\..\LICENSE" Pack="true" PackagePath="\" />
-    <None Include="..\MapperForge.Generator\bin\$(Configuration)\netstandard2.0\MapperForge.Generator.dll"
-          Pack="true"
-          PackagePath="analyzers/dotnet/cs"
-          Visible="false"
-          Condition="Exists('..\MapperForge.Generator\bin\$(Configuration)\netstandard2.0\MapperForge.Generator.dll')" />
   </ItemGroup>
+
+  <Target Name="IncludeMapperForgeGenerator">
+    <MSBuild Projects="..\MapperForge.Generator\MapperForge.Generator.csproj"
+             Targets="GetTargetPath"
+             Properties="Configuration=$(Configuration);TargetFramework=netstandard2.0">
+      <Output TaskParameter="TargetOutputs" ItemName="MapperForgeGeneratorAssembly" />
+    </MSBuild>
+    <Error Condition="!Exists('%(MapperForgeGeneratorAssembly.Identity)')"
+           Text="MapperForge generator assembly is missing: %(MapperForgeGeneratorAssembly.Identity). Build the generator before packing with --no-build." />
+    <ItemGroup>
+      <TfmSpecificPackageFile Include="@(MapperForgeGeneratorAssembly)" PackagePath="analyzers/dotnet/cs" />
+    </ItemGroup>
+  </Target>
 </Project>

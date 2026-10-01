@@ -60,10 +60,12 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
     {
         var builder = ImmutableArray.CreateBuilder<MappingPlan>();
         var mappingIndex = requests
-            .GroupBy(static request => GetMappingKey(request.SourceType, request.DestinationType))
+            .GroupBy(static request => new MappingPair(request.SourceType, request.DestinationType))
             .ToDictionary(static group => group.Key, static group => group.First());
 
-        foreach (var request in requests)
+        foreach (var request in mappingIndex.Values
+            .OrderBy(static request => SymbolUtilities.GetStableTypeIdentity(request.DestinationType), System.StringComparer.Ordinal)
+            .ThenBy(static request => SymbolUtilities.GetStableTypeIdentity(request.SourceType), System.StringComparer.Ordinal))
         {
             builder.Add(BuildPlan(compilation, request, mappingIndex));
         }
@@ -74,7 +76,7 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
     private static MappingPlan BuildPlan(
         Compilation compilation,
         MappingRequest request,
-        Dictionary<string, MappingRequest> mappingIndex)
+        Dictionary<MappingPair, MappingRequest> mappingIndex)
     {
         var diagnostics = ImmutableArray.CreateBuilder<Diagnostic>();
         var assignments = ImmutableArray.CreateBuilder<MemberAssignment>();
@@ -98,9 +100,7 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
             }
         }
 
-        var sourceProperties = request.SourceType
-            .GetMembers()
-            .OfType<IPropertySymbol>()
+        var sourceProperties = SymbolUtilities.GetProperties(request.SourceType, out var ambiguousSourceProperties)
             .Where(static property =>
                 !property.IsStatic &&
                 !property.IsIndexer &&
@@ -108,11 +108,18 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
                 property.GetMethod?.DeclaredAccessibility == Accessibility.Public)
             .ToDictionary(static property => property.Name);
 
-        var destinationProperties = request.DestinationType
-            .GetMembers()
-            .OfType<IPropertySymbol>()
+        var destinationProperties = SymbolUtilities.GetProperties(request.DestinationType, out var ambiguousDestinationProperties)
             .Where(static property => !property.IsStatic && !property.IsIndexer && !property.IsImplicitlyDeclared)
             .ToArray();
+
+        foreach (var ambiguity in ambiguousSourceProperties.Select(property => (Type: request.SourceType, Property: property))
+            .Concat(ambiguousDestinationProperties.Select(property => (Type: request.DestinationType, Property: property))))
+        {
+            diagnostics.Add(Diagnostic.Create(
+                MapperForgeDiagnostics.AmbiguousInheritedMember,
+                request.Location ?? SymbolUtilities.GetLocation(ambiguity.Property),
+                ambiguity.Type.ToDisplayString(), ambiguity.Property.Name));
+        }
 
         foreach (var destinationProperty in destinationProperties)
         {
@@ -123,7 +130,7 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
 
             var propertyLocation = SymbolUtilities.GetLocation(destinationProperty);
 
-            if (!HasAccessibleSetter(destinationProperty, request.DestinationType))
+            if (!HasAccessibleSetter(compilation, destinationProperty, request.DestinationType))
             {
                 diagnostics.Add(Diagnostic.Create(
                     MapperForgeDiagnostics.DestinationSetterNotAccessible,
@@ -145,7 +152,11 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
                 continue;
             }
 
-            var sourceExpression = "source." + SymbolUtilities.EscapeIdentifier(sourceProperty.Name);
+            var sourceReceiver = request.SourceType.TypeKind == TypeKind.Interface &&
+                !SymbolEqualityComparer.Default.Equals(sourceProperty.ContainingType, request.SourceType)
+                ? "((" + sourceProperty.ContainingType.ToDisplayString(SymbolUtilities.FullyQualifiedNullableFormat) + ")source)"
+                : "source";
+            var sourceExpression = sourceReceiver + "." + SymbolUtilities.EscapeIdentifier(sourceProperty.Name);
             var transformMethodName = GetStringAttributeArgument(destinationProperty, "MapperForge.MapTransformAttribute");
 
             if (transformMethodName is not null)
@@ -197,7 +208,7 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
         ITypeSymbol sourceType,
         ITypeSymbol destinationType,
         string sourceExpression,
-        Dictionary<string, MappingRequest> mappingIndex,
+        Dictionary<MappingPair, MappingRequest> mappingIndex,
         out string expression)
     {
         expression = "";
@@ -208,7 +219,7 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
             return false;
         }
 
-        var mappingKey = GetMappingKey(sourceNamedType, destinationNamedType);
+        var mappingKey = new MappingPair(sourceNamedType, destinationNamedType);
         if (!mappingIndex.TryGetValue(mappingKey, out var nestedMapping))
         {
             return false;
@@ -229,7 +240,7 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
         ITypeSymbol sourceType,
         ITypeSymbol destinationType,
         string sourceExpression,
-        Dictionary<string, MappingRequest> mappingIndex,
+        Dictionary<MappingPair, MappingRequest> mappingIndex,
         out string expression)
     {
         expression = "";
@@ -243,7 +254,7 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
             return false;
         }
 
-        var mappingKey = GetMappingKey(sourceElementNamedType, destinationElementNamedType);
+        var mappingKey = new MappingPair(sourceElementNamedType, destinationElementNamedType);
         if (!mappingIndex.TryGetValue(mappingKey, out var nestedMapping))
         {
             return false;
@@ -300,13 +311,6 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
             : null;
     }
 
-    private static string GetMappingKey(INamedTypeSymbol sourceType, INamedTypeSymbol destinationType)
-    {
-        return sourceType.OriginalDefinition.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) +
-            "->" +
-            destinationType.OriginalDefinition.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-    }
-
     private static bool IsNullable(ITypeSymbol type)
     {
         return type.NullableAnnotation == NullableAnnotation.Annotated;
@@ -331,7 +335,7 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
         return null;
     }
 
-    private static bool HasAccessibleSetter(IPropertySymbol property, INamedTypeSymbol destinationType)
+    private static bool HasAccessibleSetter(Compilation compilation, IPropertySymbol property, INamedTypeSymbol destinationType)
     {
         var setMethod = property.SetMethod;
         if (setMethod is null)
@@ -339,13 +343,7 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
             return false;
         }
 
-        return setMethod.DeclaredAccessibility is Accessibility.Public
-            or Accessibility.Internal
-            or Accessibility.ProtectedOrInternal
-            or Accessibility.Protected
-            or Accessibility.ProtectedAndInternal ||
-            setMethod.DeclaredAccessibility == Accessibility.Private &&
-            SymbolEqualityComparer.Default.Equals(property.ContainingType, destinationType);
+        return compilation.IsSymbolAccessibleWithin(setMethod, destinationType, destinationType);
     }
 
     private static IMethodSymbol? FindTransformMethod(
@@ -355,20 +353,24 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
         ITypeSymbol sourceType,
         ITypeSymbol destinationMemberType)
     {
-        foreach (var member in destinationType.GetMembers(methodName).OfType<IMethodSymbol>())
+        for (var current = destinationType; current is not null; current = current.BaseType)
         {
-            if (!member.IsStatic || member.Parameters.Length != 1)
+            foreach (var member in current.GetMembers(methodName).OfType<IMethodSymbol>())
             {
-                continue;
-            }
+                if (!member.IsStatic || member.Parameters.Length != 1 ||
+                    !compilation.IsSymbolAccessibleWithin(member, destinationType))
+                {
+                    continue;
+                }
 
-            if (!CanAssign(compilation, sourceType, member.Parameters[0].Type) ||
-                !CanAssign(compilation, member.ReturnType, destinationMemberType))
-            {
-                continue;
-            }
+                if (!CanAssign(compilation, sourceType, member.Parameters[0].Type) ||
+                    !CanAssign(compilation, member.ReturnType, destinationMemberType))
+                {
+                    continue;
+                }
 
-            return member;
+                return member;
+            }
         }
 
         return null;

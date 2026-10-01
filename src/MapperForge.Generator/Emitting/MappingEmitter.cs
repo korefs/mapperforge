@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Text;
 using Microsoft.CodeAnalysis;
 using MapperForge.Generator.Models;
@@ -45,7 +46,6 @@ internal static class MappingEmitter
             indent += "    ";
         }
 
-        builder.Append(indent).AppendLine("[GeneratedCode(\"MapperForge\", \"0.1.0\")]");
         builder.Append(indent)
             .Append("partial ")
             .Append(SymbolUtilities.GetTypeKeyword(destination))
@@ -55,6 +55,7 @@ internal static class MappingEmitter
         builder.Append(indent).AppendLine("{");
 
         var bodyIndent = indent + "    ";
+        builder.Append(bodyIndent).AppendLine("[GeneratedCode(\"MapperForge\", \"0.1.0\")]");
         builder.Append(bodyIndent)
             .Append("public static ")
             .Append(destinationTypeName)
@@ -189,9 +190,15 @@ internal static class MappingEmitter
                 builder.Append(char.IsLetterOrDigit(character) ? character : '_');
             }
 
-            return builder.ToString();
+            return builder.ToString(0, System.Math.Min(builder.Length, 80));
         }
 
-        return Sanitize(plan.DestinationType.ToDisplayString()) + "_From_" + Sanitize(plan.SourceType.ToDisplayString()) + ".g.cs";
+        var identity = SymbolUtilities.GetStableTypeIdentity(plan.SourceType) + "->" +
+            SymbolUtilities.GetStableTypeIdentity(plan.DestinationType);
+        using var sha256 = SHA256.Create();
+        var hash = string.Concat(sha256.ComputeHash(Encoding.UTF8.GetBytes(identity))
+            .Select(static value => value.ToString("x2", System.Globalization.CultureInfo.InvariantCulture)));
+        return Sanitize(plan.DestinationType.ToDisplayString()) + "_From_" +
+            Sanitize(plan.SourceType.ToDisplayString()) + "_" + hash + ".g.cs";
     }
 }

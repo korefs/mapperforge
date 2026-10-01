@@ -10,3 +10,4 @@ BenchmarkDotNet.Artifacts/
 *.nupkg
 *.snupkg
 *.log
+docs/

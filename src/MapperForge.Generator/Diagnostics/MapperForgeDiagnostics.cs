@@ -6,6 +6,14 @@ internal static class MapperForgeDiagnostics
 {
     private const string Category = "MapperForge";
 
+    public static readonly DiagnosticDescriptor AmbiguousInheritedMember = new(
+        "MFG012",
+        "Inherited member is ambiguous",
+        "Type '{0}' inherits incompatible declarations of member '{1}'. Declare the member on a derived interface to resolve the ambiguity.",
+        Category,
+        DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
     public static readonly DiagnosticDescriptor DestinationMustBePartial = new(
         "MFG001",
         "Destination type must be partial",

@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <MapperForgePackageVersion Condition="'$(MapperForgePackageVersion)' == ''">1.0.0</MapperForgePackageVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="MapperForge" Version="$(MapperForgePackageVersion)" />
+  </ItemGroup>
+</Project>
