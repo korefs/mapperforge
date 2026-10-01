@@ -1,286 +1,268 @@
 # MapperForge
 
-[![CI](https://github.com/your-org/mapperforge/actions/workflows/ci.yml/badge.svg)](https://github.com/your-org/mapperforge/actions/workflows/ci.yml)
-[![NuGet](https://img.shields.io/nuget/v/MapperForge.svg)](https://www.nuget.org/packages/MapperForge)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![.NET 8](https://img.shields.io/badge/.NET-8.0-512BD4.svg)](https://dotnet.microsoft.com/)
+**Compile-time object mapping for .NET, with explicit C# you can inspect and debug.**
 
-MapperForge is an experimental .NET object mapper built around Roslyn source generation. It generates explicit C# mapping code at compile time, avoids runtime reflection, and keeps mapping behavior easy to debug.
+[![CI](https://github.com/korefs/mapperforge/actions/workflows/ci.yml/badge.svg)](https://github.com/korefs/mapperforge/actions/workflows/ci.yml)
+![Target framework](https://img.shields.io/badge/.NET-8.0-512BD4?style=flat-square)
+![Status](https://img.shields.io/badge/status-experimental-orange?style=flat-square)
 
-## Install
+[Get started](#get-started) · [Mapping](#mapping) · [Supported contract](#supported-contract) · [Diagnostics](#diagnostics) · [Development](#development)
+
+MapperForge is a Roslyn incremental source generator for mapping entities, DTOs, commands, and view models. Declare a source on a partial destination type; the generator adds a static `From` method and typed extension methods. Generated mappings use property assignments and static calls without runtime reflection or mapper registration.
+
+> [!NOTE]
+> MapperForge is experimental. The public API and supported mapping shapes may change. The instructions below build a package from this repository; they do not require a published NuGet release.
+
+## Features
+
+- **Generated C#:** mappings are created during compilation and remain easy to step through.
+- **Small API:** use `Destination.From(source)`, `source.MapTo<Destination>()`, or collection helpers.
+- **Property customization:** rename, ignore, or transform destination properties with attributes.
+- **Composed mappings:** map nested objects and supported collections using declared element maps.
+- **Inheritance and multiple sources:** map inherited properties and generate distinct `From` overloads.
+- **Build-time feedback:** diagnose incompatible members, invalid construction, transforms, and unsafe nullability conversions.
+
+## Get started
+
+The library targets `net8.0` and uses C# 12. The generator references Roslyn 4.11, so use an SDK with a compatible compiler; SDK **9.0.201** is verified for this workspace. Running the sample and tests also requires the .NET 8 runtime (including ASP.NET Core for the sample).
+
+Clone the repository and build a local NuGet package:
 
 ```bash
-dotnet add package MapperForge
+git clone https://github.com/korefs/mapperforge.git
+cd mapperforge
+dotnet pack src/MapperForge/MapperForge.csproj -c Release -o artifacts/packages
 ```
 
-The NuGet package contains both the runtime attributes and the source generator analyzer.
+From your application's project directory, install it using the absolute path to that package folder:
 
-## Why MapperForge
+```bash
+dotnet add package MapperForge --source /absolute/path/to/mapperforge/artifacts/packages
+```
 
-- Compile-time generated mapping code.
-- No runtime reflection for generated mappings.
-- Familiar APIs for DTOs, commands, view models, and entities.
-- Diagnostics that explain unmapped, incompatible, or invalid members while you build.
-- Good fit for Clean Architecture, DDD, ASP.NET Core APIs, and corporate codebases where predictable code matters.
+The package includes both the attributes/marker interface and the source generator in `analyzers/dotnet/cs`. No separate generator package is needed. Enable nullable annotations in your application for the nullability checks below.
 
-## Basic Usage
+### Your first mapping
+
+Put this example in a console application's `Program.cs`:
 
 ```csharp
 using MapperForge;
 
-public sealed class User
-{
-    public int Id { get; init; }
-    public string Name { get; init; } = "";
-}
-
-[MapFrom(typeof(User))]
-public partial class UserDto
-{
-    public int Id { get; init; }
-    public string Name { get; init; } = "";
-}
-
+var user = new User(42, "Ada Lovelace", "ADA@EXAMPLE.COM");
 var dto = UserDto.From(user);
-var dto2 = user.MapTo<UserDto>();
-var list = users.MapToList<UserDto>();
-var sameList = users.MapTo<UserDto>();
-```
+var sameDto = user.MapTo<UserDto>();
+var dtos = new[] { user }.MapToList<UserDto>();
 
-Destination types must be `partial` because MapperForge adds the generated `From` method to them.
+Console.WriteLine($"{dto.Id}: {dto.Name} <{dto.Email}>");
+// 42: Ada Lovelace <ada@example.com>
 
-The marker interface is an equivalent declaration:
+public sealed record User(int Id, string DisplayName, string Email);
 
-```csharp
-public partial class UserDto : IMapFrom<User>
+[MapFrom(typeof(User))]
+public sealed partial class UserDto
 {
     public int Id { get; init; }
-    public string Name { get; init; } = "";
-}
-```
 
-Interfaces can compose `IMapFrom<TSource>` contracts for concrete destinations. The generator combines marker interfaces and attributes, including repeated pairs across partial declarations, and generates each pair once. The marker has no runtime members to implement.
-
-## Supported Contract
-
-| Area | Current support |
-| --- | --- |
-| Source | Accessible named classes, structs, records and interfaces, including closed generics. |
-| Destination | Accessible, concrete, non-generic partial classes, structs and simple records. |
-| Containers | Accessible, non-generic partial classes, structs or records. Static class containers are allowed. |
-| Accessibility | Public and internal models work. `From` is internal when either model is effectively internal; helper methods with internal source signatures are internal. Private/protected nested and file-local types inaccessible to helpers produce MFG006. |
-| Construction | An accessible constructor callable without arguments, including private constructors on the partial destination and unambiguous optional/params constructors. Required members must be mapped or covered by `[SetsRequiredMembers]`; otherwise MFG007. |
-| Members | Public source getters and accessible destination setters/init accessors. Use `[MapIgnore]` for computed members. Ref/pointer property signatures are unsupported. |
-| Existing methods | An existing conflicting `From(Source)` signature produces MFG006. Other overloads remain available. |
-| Object-typed input | `object.MapTo<TDestination>()` throws `MapperForgeMappingException`, including when the runtime type has a map. Explicit `object` source declarations are rejected with MFG006. |
-| Collections | Top-level `MapToList<TDestination>` and enumerable `MapTo<TDestination>` return `List<TDestination>`. Property conversion supports named enumerable sources into `List<T>`/`IReadOnlyList<T>` when an element map exists; additional materialization is planned in stage 5. |
-
-Abstract/static destinations, ref structs, open generic sources, generic destinations and generic destination containers produce MFG006. A local `MapperForge.MapperForgeGeneratedExtensions` declaration is reserved. A source declared as `IEnumerable<T>` alongside a map for `T` is rejected when its root extension would collide with the collection overload.
-
-Collections validate the requested destination before calling `GetEnumerator`, including for empty inputs. Supported collections enumerate once. Directly assignable collections share their existing reference; they are not deep copies. Nullable reference annotations can be widened on CLR-identical generic types through an explicit annotation view without materializing a collection.
-
-Mapping constructor arguments, positional destination records with required constructor parameters, external map discovery and recursive-map validation remain scheduled in later stages.
-
-## Inheritance and Multiple Sources
-
-MapperForge maps properties declared on source and destination base classes. Properties are processed in ordinal name order; the most derived declaration wins for both `override` and `new`. This fixes inherited values that earlier versions silently left at their defaults.
-
-Attributes on a selected inherited property remain effective. A new declaration or override uses its own attributes: `MapProperty`, `MapIgnore`, and `MapTransform` are not inherited by overrides. Inherited transforms can call accessible static methods on the destination's base classes. Setters are checked from the destination's context: a private setter on the destination works, while a private setter on a base class produces MFG005. Ignore computed or intentionally unmapped properties with `[MapIgnore]`.
-
-Source interfaces include inherited properties. A declaration on a derived interface takes precedence. Compatible declarations from unrelated interfaces are resolved by the declaring interface's ordinal fully qualified name and read through that interface; incompatible declarations produce MFG012 until a derived interface redeclares the property.
-
-A destination can declare multiple sources, and a source can map to multiple destinations:
-
-```csharp
-[MapFrom(typeof(User))]
-[MapFrom(typeof(ImportedUser))]
-public partial class UserDto
-{
-    public int Id { get; init; }
-}
-
-var local = UserDto.From(user);
-var imported = UserDto.From(importedUser);
-var another = importedUser.MapTo<UserDto>();
-```
-
-Repeating the same source/destination pair is idempotent, including across partial declarations. Closed generic sources such as `Source<int>` and `Source<string>` remain distinct in direct, nested, and collection mappings. Generated filenames include a stable SHA-256 suffix to distinguish names that sanitize identically. Generic destinations and generic destination containers produce MFG006.
-
-## Rename Members With MapProperty
-
-```csharp
-[MapFrom(typeof(User))]
-public partial class UserDto
-{
     [MapProperty(nameof(User.DisplayName))]
     public string Name { get; init; } = "";
-}
-```
 
-## Ignore Members With MapIgnore
-
-```csharp
-[MapFrom(typeof(User))]
-public partial class UserDto
-{
-    public int Id { get; init; }
-
-    [MapIgnore]
-    public string InternalNote { get; init; } = "created locally";
-}
-```
-
-## Transform Members With MapTransform
-
-```csharp
-[MapFrom(typeof(User))]
-public partial class UserDto
-{
     [MapTransform(nameof(NormalizeEmail))]
     public string Email { get; init; } = "";
 
-    private static string NormalizeEmail(string email)
-    {
-        return email.Trim().ToLowerInvariant();
-    }
+    [MapIgnore]
+    public string InternalNote { get; init; } = "created locally";
+
+    private static string NormalizeEmail(string email) =>
+        email.Trim().ToLowerInvariant();
 }
 ```
 
-Transform methods must be accessible static ordinary methods, non-generic, non-void, with exactly one by-value parameter and a return type implicitly assignable to the destination member. Ref/out/in parameters are rejected. Overloads use the best implicit input conversion, preferring an exact match; missing, incompatible or ambiguous candidates produce MFG004. Transform exceptions propagate to the caller.
+Matching properties such as `Id` map by name. `[MapProperty]` selects a different source property, `[MapTransform]` converts its value, and `[MapIgnore]` leaves a destination property at its constructed value. Attributes belong on destination properties. Destinations and their containing types must be `partial`.
 
-## Null Policy
+## Mapping
 
-| Input → destination | Behavior |
-| --- | --- |
-| Non-nullable → non-nullable | Copy, map or transform the value. |
-| Non-nullable → nullable | Allow; do not add a null value. |
-| Nullable → nullable | Preserve null for direct assignments and nested/collection mapping. |
-| Nullable → non-nullable | MFG008 unless an explicit transform declares nullable input and non-nullable output. |
-| Unannotated → non-nullable | MFG013 warning when a non-nullable obligation cannot be verified. |
+### Declare maps
 
-The policy covers nullable value types and reference annotations, including collection elements and nested generic annotations. For a nullable input and nullable destination, a transform with non-nullable input runs only for a non-null value. A transform declaring nullable input receives null and is responsible for its result contract. Nullable return values cannot feed non-nullable members.
-
-Every reference root API rejects null with `ArgumentNullException`. Non-nullable annotations are a static contract; generated mappings do not add a runtime null check to every property. Missing annotations remain visible through MFG013 rather than null-forgiving operators.
-
-As an example, an explicit fallback can satisfy a non-nullable destination:
+`IMapFrom<TSource>` is an alternative to `[MapFrom(typeof(TSource))]`:
 
 ```csharp
+public partial class UserSummary : IMapFrom<User>
+{
+    public int Id { get; init; }
+}
+```
+
+The marker has no members to implement. A destination can declare multiple source attributes or marker interfaces, producing one `From` overload per source. A source can map to several destinations. Repeated source/destination pairs, including attribute + marker declarations, generate only one map. Closed generic sources such as `Source<int>` and `Source<string>` remain distinct.
+
+### Map objects and collections
+
+| API | Result |
+| --- | --- |
+| `UserDto.From(user)` | A new `UserDto` through a generated static method. |
+| `user.MapTo<UserDto>()` | A new `UserDto` through a generated extension for the declared source type. |
+| `users.MapToList<UserDto>()` | A new `List<UserDto>` from `IEnumerable<User>`. |
+| `users.MapTo<UserDto>()` | The same collection behavior as `MapToList`. |
+
+Collection helpers enumerate once and validate the requested destination before enumeration, even for an empty input. Null reference roots throw `ArgumentNullException`. Unknown destinations throw `MapperForgeMappingException`; an input typed as `object` also takes this failure path, even if its runtime type has a map. Keep the source's declared type when calling the extensions.
+
+### Map nested properties
+
+Declare a map for each nested source/destination pair in the same compilation:
+
+```csharp
+public sealed class Address
+{
+    public string Street { get; init; } = "";
+}
+
+public sealed class Profile
+{
+    public Address? BillingAddress { get; init; }
+    public List<Address> PreviousAddresses { get; init; } = [];
+}
+
+[MapFrom(typeof(Address))]
+public partial class AddressDto
+{
+    public string Street { get; init; } = "";
+}
+
+[MapFrom(typeof(Profile))]
+public partial class ProfileDto
+{
+    public AddressDto? BillingAddress { get; init; }
+    public List<AddressDto> PreviousAddresses { get; init; } = [];
+}
+```
+
+The generated mapping preserves a null `BillingAddress` and maps each previous address. Property collection conversion supports named enumerable source types into `List<T>` or `IReadOnlyList<T>` when an element map exists. Directly assignable properties are copied as-is, so object and collection references can be shared; mapping is not a general deep-copy operation.
+
+### Transforms and nullability
+
+Transforms must be accessible static, non-generic, non-void methods on the destination or its base classes. They take exactly one by-value parameter and return a value implicitly assignable to the destination property. Overloads prefer the best implicit input conversion, including exact matches; invalid or ambiguous candidates produce MFG004. Transform exceptions propagate to the caller.
+
+| Source → destination | Behavior |
+| --- | --- |
+| Non-nullable → non-nullable | Assign, map, or transform. |
+| Non-nullable → nullable | Allowed. |
+| Nullable → nullable | Preserve null for direct, nested, and collection mappings. |
+| Nullable → non-nullable | MFG008 unless a transform explicitly accepts nullable input and returns non-nullable output. |
+| Unknown nullability → non-nullable | MFG013 warning when the destination contract cannot be verified. |
+
+The policy applies to nullable value types, reference annotations, collection elements, and nested generic annotations. For nullable input and destination, a transform with non-nullable input is called only when the value is present. A transform declaring nullable input receives null and owns the fallback:
+
+```csharp
+// On a destination mapping a source with a nullable Email property:
 [MapTransform(nameof(Normalize))]
 public string Email { get; init; } = "";
 
 private static string Normalize(string? email) => email?.Trim() ?? "";
 ```
 
-**Experimental API change:** `MapperForgeOptions` was a placeholder with no mapping behavior and has been removed. Remove references to `MapperForgeOptions.Default`; global configuration will require a future contract.
+Non-nullable annotations are a static contract; generated code does not check every property for null at runtime.
 
-## Nested Mapping
+## Supported contract
 
-MapperForge maps nested objects when the nested destination type also declares an explicit source mapping:
+| Area | Current support |
+| --- | --- |
+| Sources | Accessible named classes, structs, records, and interfaces, including closed generics. |
+| Destinations | Accessible concrete, non-generic partial classes, structs, records, and record structs. |
+| Nested destinations | Accessible non-generic partial containers; static class containers are allowed. |
+| Construction | An unambiguous constructor callable without arguments, including private destination constructors and optional/`params` constructors. Required members must be mapped or covered by `[SetsRequiredMembers]`. |
+| Properties | Public source getters and destination setters or `init` accessors accessible from the destination. Fields, indexers, and static properties are not mapped. Ignore computed properties with `[MapIgnore]`. |
+| Inheritance | Source and destination base properties are included; the most derived declaration wins for `override` and `new`. Overrides use their own mapping attributes. |
+| Interfaces | Inherited source properties are supported. Incompatible declarations require a prevailing declaration on a derived interface (MFG012). |
+| Visibility | Public and internal models work. `From` becomes internal when either model is effectively internal; inaccessible nested/file-local types are rejected. |
+| Existing methods | Other `From` overloads remain available; a conflicting `From(Source)` signature is rejected. `MapperForge.MapperForgeGeneratedExtensions` is a reserved type name. |
 
-```csharp
-public sealed class User
-{
-    public Address Address { get; set; } = new();
-}
+> [!IMPORTANT]
+> Constructor-argument mapping, positional destinations requiring arguments, generic destinations/containers, abstract or static destinations, ref structs, open generic sources, and ref/pointer property signatures are unsupported. Automatic discovery of maps in referenced assemblies and recursive-map validation are not implemented. Use acyclic mapping graphs; cyclic input graphs can recurse indefinitely.
 
-[MapFrom(typeof(User))]
-public partial class UserDto
-{
-    public AddressDto Address { get; set; } = new();
-}
-
-[MapFrom(typeof(Address))]
-public partial class AddressDto
-{
-    public string Street { get; set; } = "";
-}
-```
-
-The generated assignment is equivalent to:
-
-```csharp
-Address = AddressDto.From(source.Address)
-```
-
-Nullable nested mappings preserve nulls:
-
-```csharp
-public Address? BillingAddress { get; set; }
-public AddressDto? BillingAddress { get; set; }
-```
-
-Collections are supported for `List<T>` and `IReadOnlyList<T>` destinations when the element mapping exists:
-
-```csharp
-public List<Address> PreviousAddresses { get; set; } = [];
-public List<AddressDto> PreviousAddresses { get; set; } = [];
-
-public IReadOnlyList<Address> KnownAddresses { get; set; } = [];
-public IReadOnlyList<AddressDto> KnownAddresses { get; set; } = [];
-```
+A source map declared for `IEnumerable<T>` is also rejected when a map for `T` would generate a conflicting collection extension. Array property materialization and collection conversions beyond the forms described above remain future work.
 
 ## Diagnostics
 
-| ID | Severity | Meaning |
+| ID | Severity | Meaning / action |
 | --- | --- | --- |
-| MFG001 | Error | Destination or container declaring an attribute/marker map is not partial. |
-| MFG002 | Warning | Destination member could not be mapped from the source type. |
-| MFG003 | Error | Source and destination member types are incompatible. |
-| MFG004 | Error | Transform method was not found or has an invalid or ambiguous signature. |
-| MFG005 | Error | Destination member has no accessible setter. |
-| MFG006 | Error | Unsupported type shape, accessibility, name or generated signature conflict. |
-| MFG007 | Error | No valid construction without arguments, or an unfulfilled required member. |
-| MFG008 | Error | Nullable value cannot satisfy a non-nullable obligation without explicit handling. |
-| MFG009 | Error (reserved) | Invalid/unavailable mapping dependency; detailed planning is scheduled in stage 6. |
-| MFG010 | Error (reserved) | Recursive mapping dependency; scheduled in stage 6. |
-| MFG011 | Error (reserved) | Incompatible, malformed or ambiguous external mapping contract; scheduled in stage 3. |
-| MFG012 | Error | Inherited interface members have incompatible declarations without a prevailing declaration. |
-| MFG013 | Warning | Source nullability is unknown for a non-nullable obligation. |
+| MFG001 | Error | Mark the destination and its containers `partial`. |
+| MFG002 | Warning | No matching source property; rename or ignore the destination property. |
+| MFG003 | Error | Incompatible property types; provide a supported nested map or transform. |
+| MFG004 | Error | Missing, invalid, or ambiguous transform method. |
+| MFG005 | Error | Destination property has no accessible setter. |
+| MFG006 | Error | Unsupported type shape, accessibility, reserved name, or signature conflict. |
+| MFG007 | Error | Destination cannot be constructed without arguments or has an unfulfilled required member. |
+| MFG008 | Error | Nullable input cannot satisfy a non-nullable destination contract. |
+| MFG012 | Error | Inherited interface property declarations are incompatible. |
+| MFG013 | Warning | Source nullability cannot be verified; enable annotations or declare a transform contract. |
 
-## Local Validation and Packaging
+MFG009–MFG011 are reserved for future dependency, recursion, and external mapping contract diagnostics; they are not currently emitted.
+
+## Development
+
+Run these commands from the repository root:
 
 ```bash
-dotnet build MapperForge.sln -c Release
+dotnet restore MapperForge.sln
+dotnet build MapperForge.sln -c Release --no-restore
 dotnet test MapperForge.sln -c Release --no-build
+```
+
+| Location | Purpose |
+| --- | --- |
+| [`src/MapperForge`](src/MapperForge) | Public attributes, marker interface, and runtime failure API. |
+| [`src/MapperForge.Generator`](src/MapperForge.Generator) | Mapping discovery, validation, diagnostics, and C# emission. |
+| [`tests`](tests) | Generator compilation/execution tests, runtime tests, and a package-only consumer. |
+| [`samples/MapperForge.Sample.Api`](samples/MapperForge.Sample.Api) | ASP.NET Core API showing DTO mapping. |
+| [`benchmarks/MapperForge.Benchmarks`](benchmarks/MapperForge.Benchmarks) | BenchmarkDotNet comparison against manual mapping. |
+| [`scripts/verify-package.py`](scripts/verify-package.py) | Isolated package and consumer validation. |
+
+### Run the API sample
+
+```bash
+dotnet run --project samples/MapperForge.Sample.Api --launch-profile http
+```
+
+Open [Swagger UI](http://localhost:5026/swagger) or try:
+
+```bash
+curl http://localhost:5026/users
+curl http://localhost:5026/users/1
+```
+
+The sample exposes `GET /users`, `GET /users/{id}`, and `POST /users`. It keeps users in memory and demonstrates property renaming, email normalization, and collection mapping.
+
+### Validate packaging
+
+```bash
 python3 scripts/verify-package.py
 ```
 
-The package check requires Python 3, a compatible .NET SDK, and NuGet access for build dependencies and any missing .NET 8 reference packs. It copies sources into a temporary workspace without `bin` or `obj`, packs from scratch, checks that exactly one generator DLL exists in `analyzers/dotnet/cs`, and executes a consumer referencing only the local package. It repeats consumption after build → pack `--no-build`, using separate empty NuGet package caches and source mapping that restricts MapperForge to the local package. It also verifies that a missing generator DLL causes an explicit pack failure without creating a package. Temporary artifacts are removed after validation.
+Requires Python 3, a compatible .NET SDK/runtime, and NuGet access. The script uses a clean temporary source copy and isolated package caches to check clean packing, build → pack `--no-build`, exactly one generator DLL, and a consumer referencing only the local package. It also checks that a missing generator DLL fails packing. Temporary artifacts are cleaned up automatically.
 
-Both packaging workflows are supported:
+After a successful Release build, you can also pack with:
 
 ```bash
-dotnet pack src/MapperForge/MapperForge.csproj -c Release
-# Or, after a successful Release build:
-dotnet pack src/MapperForge/MapperForge.csproj -c Release --no-build
+dotnet pack src/MapperForge/MapperForge.csproj -c Release --no-build -o artifacts/packages
 ```
 
-## Performance
+The [CI workflow](.github/workflows/ci.yml) restores, builds, tests, and uploads packages. The isolated Python package check is currently a separate local command.
 
-MapperForge emits plain C# assignments and static method calls. The benchmark project compares manual mapping with MapperForge generated mapping:
+### Run benchmarks
 
 ```bash
 dotnet run -c Release --project benchmarks/MapperForge.Benchmarks
 ```
 
-Benchmark baselines for AutoMapper and Mapster are intentionally left for a later milestone so the first version stays focused and transparent.
+The benchmark compares generated `From` mapping with equivalent manual assignments and reports allocations. AutoMapper and Mapster comparisons are not included; no performance claims are made beyond what you measure locally.
 
-## Roadmap
+## Planned work
 
-The implementation specs and progress checklist are maintained in [Execution order](docs/specs/00-ordem-de-execucao.md). Start with MVP stabilization, then follow the dependencies and acceptance criteria recorded there.
+- Discover and reuse maps from referenced assemblies.
+- Map constructor arguments and positional records.
+- Expand collection conversion and materialization.
+- Validate mapping dependencies and reject recursive graphs.
+- Add SDK compatibility tracking, analyzer release tracking, and code fixes.
+- Explore global conventions, configuration, and dependency injection helpers.
 
-- Constructor and primary-constructor mapping.
-- Records and immutable model enhancements.
-- Collection conversion beyond `List<T>` and `IReadOnlyList<T>` nested mapping.
-- Global conventions and configuration.
-- Dependency injection helpers.
-- AutoMapper and Mapster benchmark baselines.
-- Analyzer release tracking and code fixes.
-
-## Status
-
-MapperForge is experimental. The MVP API is intentionally small while the generator behavior, diagnostics, and package shape stabilize.
-
-## License
-
-MapperForge is licensed under the [MIT License](LICENSE).
+The earlier `MapperForgeOptions.Default` placeholder has been removed; it had no mapping behavior. Global configuration needs a future API contract.
