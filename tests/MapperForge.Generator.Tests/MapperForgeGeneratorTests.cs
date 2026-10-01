@@ -37,7 +37,7 @@ public sealed class MapperForgeGeneratorTests
 
         var generated = string.Join(Environment.NewLine, result.GeneratedSources);
         generated.Should().Contain("UserDto.From(source)");
-        generated.Should().Contain("public static List<TDestination> MapTo<TDestination>(this IEnumerable<global::Demo.User> source)");
+        generated.Should().Contain("public static global::System.Collections.Generic.List<TDestination> MapTo<TDestination>(this global::System.Collections.Generic.IEnumerable<global::Demo.User> source)");
         generated.Should().Contain("return source.MapToList<TDestination>();");
         generated.Should().NotContain("System.Reflection");
         generated.Should().NotContain("GetProperty");
@@ -92,7 +92,7 @@ public sealed class MapperForgeGeneratorTests
 
         var generated = string.Join(Environment.NewLine, result.GeneratedSources);
         generated.Should().Contain("Address = global::Demo.AddressDto.From(source.Address)");
-        generated.Should().Contain("BillingAddress = source.BillingAddress is null ? null : global::Demo.AddressDto.From(source.BillingAddress!)");
+        generated.Should().Contain("BillingAddress = source.BillingAddress is { } __mfgValue1 ? global::Demo.AddressDto.From(__mfgValue1) : null");
         generated.Should().Contain("PreviousAddresses = global::MapperForge.MapperForgeGeneratedExtensions.MapToList<global::Demo.AddressDto>(source.PreviousAddresses)");
         generated.Should().Contain("KnownAddresses = global::MapperForge.MapperForgeGeneratedExtensions.MapToList<global::Demo.AddressDto>(source.KnownAddresses)");
     }

@@ -25,7 +25,7 @@ internal static class MappingEmitter
 
         var namespaceName = destination.ContainingNamespace.IsGlobalNamespace
             ? null
-            : destination.ContainingNamespace.ToDisplayString();
+            : SymbolUtilities.GetNamespaceName(destination.ContainingNamespace);
 
         if (namespaceName is not null)
         {
@@ -40,7 +40,7 @@ internal static class MappingEmitter
                 .Append("partial ")
                 .Append(SymbolUtilities.GetTypeKeyword(containingType))
                 .Append(' ')
-                .Append(containingType.Name)
+                .Append(SymbolUtilities.EscapeIdentifier(containingType.Name))
                 .AppendLine();
             builder.Append(indent).AppendLine("{");
             indent += "    ";
@@ -50,20 +50,21 @@ internal static class MappingEmitter
             .Append("partial ")
             .Append(SymbolUtilities.GetTypeKeyword(destination))
             .Append(' ')
-            .Append(destination.Name)
+            .Append(SymbolUtilities.EscapeIdentifier(destination.Name))
             .AppendLine();
         builder.Append(indent).AppendLine("{");
 
         var bodyIndent = indent + "    ";
-        builder.Append(bodyIndent).AppendLine("[GeneratedCode(\"MapperForge\", \"0.1.0\")]");
+        builder.Append(bodyIndent).AppendLine("[global::System.CodeDom.Compiler.GeneratedCode(\"MapperForge\", \"0.1.0\")]");
         builder.Append(bodyIndent)
-            .Append("public static ")
+            .Append(plan.MethodAccessibility).Append(plan.HidesInheritedFrom ? " new static " : " static ")
             .Append(destinationTypeName)
             .Append(" From(")
             .Append(sourceTypeName)
             .AppendLine(" source)");
         builder.Append(bodyIndent).AppendLine("{");
-        builder.Append(bodyIndent).AppendLine("    ArgumentNullException.ThrowIfNull(source);");
+        if (plan.SourceType.IsReferenceType || NullabilityPolicy.IsNullable(plan.SourceType))
+            builder.Append(bodyIndent).AppendLine("    global::System.ArgumentNullException.ThrowIfNull(source);");
         builder.AppendLine();
 
         if (plan.Assignments.Length == 0)
@@ -116,18 +117,20 @@ internal static class MappingEmitter
         builder.AppendLine();
         builder.AppendLine("namespace MapperForge;");
         builder.AppendLine();
-        builder.AppendLine("[GeneratedCode(\"MapperForge\", \"0.1.0\")]");
+        builder.AppendLine("[global::System.CodeDom.Compiler.GeneratedCode(\"MapperForge\", \"0.1.0\")]");
         builder.AppendLine("public static partial class MapperForgeGeneratedExtensions");
         builder.AppendLine("{");
 
         foreach (var group in groupedPlans)
         {
             var sourceTypeName = group.Key!.ToDisplayString(SymbolUtilities.FullyQualifiedNullableFormat);
-            builder.Append("    public static TDestination MapTo<TDestination>(this ")
+            var accessibility = SymbolUtilities.IsPubliclyAccessible((ITypeSymbol)group.Key) ? "public" : "internal";
+            builder.Append("    ").Append(accessibility).Append(" static TDestination MapTo<TDestination>(this ")
                 .Append(sourceTypeName)
                 .AppendLine(" source)");
             builder.AppendLine("    {");
-            builder.AppendLine("        ArgumentNullException.ThrowIfNull(source);");
+            if (((ITypeSymbol)group.Key).IsReferenceType || NullabilityPolicy.IsNullable((ITypeSymbol)group.Key))
+                builder.AppendLine("        global::System.ArgumentNullException.ThrowIfNull(source);");
             builder.AppendLine();
 
             foreach (var plan in group.OrderBy(static plan => plan.DestinationType.ToDisplayString(SymbolUtilities.FullyQualifiedNullableFormat)))
@@ -150,12 +153,21 @@ internal static class MappingEmitter
             builder.AppendLine("    }");
             builder.AppendLine();
 
-            builder.Append("    public static List<TDestination> MapToList<TDestination>(this IEnumerable<")
+            builder.Append("    ").Append(accessibility).Append(" static global::System.Collections.Generic.List<TDestination> MapToList<TDestination>(this global::System.Collections.Generic.IEnumerable<")
                 .Append(sourceTypeName)
                 .AppendLine("> source)");
             builder.AppendLine("    {");
-            builder.AppendLine("        ArgumentNullException.ThrowIfNull(source);");
-            builder.AppendLine("        var results = new List<TDestination>();");
+            builder.AppendLine("        global::System.ArgumentNullException.ThrowIfNull(source);");
+            builder.Append("        if (");
+            builder.Append(string.Join(" && ", group.Select(static plan => "typeof(TDestination) != typeof(" +
+                plan.DestinationType.ToDisplayString(SymbolUtilities.FullyQualifiedNullableFormat) + ")")));
+            builder.AppendLine(")");
+            builder.AppendLine("        {");
+            builder.Append("            throw new global::MapperForge.MapperForgeMappingException($\"MapperForge could not find a generated mapping from '")
+                .Append(sourceTypeName.Replace("global::", ""))
+                .AppendLine("' to '{typeof(TDestination).FullName}'.\");");
+            builder.AppendLine("        }");
+            builder.AppendLine("        var results = new global::System.Collections.Generic.List<TDestination>();");
             builder.AppendLine();
             builder.AppendLine("        foreach (var item in source)");
             builder.AppendLine("        {");
@@ -166,7 +178,7 @@ internal static class MappingEmitter
             builder.AppendLine("    }");
             builder.AppendLine();
 
-            builder.Append("    public static List<TDestination> MapTo<TDestination>(this IEnumerable<")
+            builder.Append("    ").Append(accessibility).Append(" static global::System.Collections.Generic.List<TDestination> MapTo<TDestination>(this global::System.Collections.Generic.IEnumerable<")
                 .Append(sourceTypeName)
                 .AppendLine("> source)");
             builder.AppendLine("    {");

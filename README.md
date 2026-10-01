@@ -49,6 +49,38 @@ var sameList = users.MapTo<UserDto>();
 
 Destination types must be `partial` because MapperForge adds the generated `From` method to them.
 
+The marker interface is an equivalent declaration:
+
+```csharp
+public partial class UserDto : IMapFrom<User>
+{
+    public int Id { get; init; }
+    public string Name { get; init; } = "";
+}
+```
+
+Interfaces can compose `IMapFrom<TSource>` contracts for concrete destinations. The generator combines marker interfaces and attributes, including repeated pairs across partial declarations, and generates each pair once. The marker has no runtime members to implement.
+
+## Supported Contract
+
+| Area | Current support |
+| --- | --- |
+| Source | Accessible named classes, structs, records and interfaces, including closed generics. |
+| Destination | Accessible, concrete, non-generic partial classes, structs and simple records. |
+| Containers | Accessible, non-generic partial classes, structs or records. Static class containers are allowed. |
+| Accessibility | Public and internal models work. `From` is internal when either model is effectively internal; helper methods with internal source signatures are internal. Private/protected nested and file-local types inaccessible to helpers produce MFG006. |
+| Construction | An accessible constructor callable without arguments, including private constructors on the partial destination and unambiguous optional/params constructors. Required members must be mapped or covered by `[SetsRequiredMembers]`; otherwise MFG007. |
+| Members | Public source getters and accessible destination setters/init accessors. Use `[MapIgnore]` for computed members. Ref/pointer property signatures are unsupported. |
+| Existing methods | An existing conflicting `From(Source)` signature produces MFG006. Other overloads remain available. |
+| Object-typed input | `object.MapTo<TDestination>()` throws `MapperForgeMappingException`, including when the runtime type has a map. Explicit `object` source declarations are rejected with MFG006. |
+| Collections | Top-level `MapToList<TDestination>` and enumerable `MapTo<TDestination>` return `List<TDestination>`. Property conversion supports named enumerable sources into `List<T>`/`IReadOnlyList<T>` when an element map exists; additional materialization is planned in stage 5. |
+
+Abstract/static destinations, ref structs, open generic sources, generic destinations and generic destination containers produce MFG006. A local `MapperForge.MapperForgeGeneratedExtensions` declaration is reserved. A source declared as `IEnumerable<T>` alongside a map for `T` is rejected when its root extension would collide with the collection overload.
+
+Collections validate the requested destination before calling `GetEnumerator`, including for empty inputs. Supported collections enumerate once. Directly assignable collections share their existing reference; they are not deep copies. Nullable reference annotations can be widened on CLR-identical generic types through an explicit annotation view without materializing a collection.
+
+Mapping constructor arguments, positional destination records with required constructor parameters, external map discovery and recursive-map validation remain scheduled in later stages.
+
 ## Inheritance and Multiple Sources
 
 MapperForge maps properties declared on source and destination base classes. Properties are processed in ordinal name order; the most derived declaration wins for both `override` and `new`. This fixes inherited values that earlier versions silently left at their defaults.
@@ -72,7 +104,7 @@ var imported = UserDto.From(importedUser);
 var another = importedUser.MapTo<UserDto>();
 ```
 
-Repeating the same source/destination pair is idempotent, including across partial declarations. Closed generic sources such as `Source<int>` and `Source<string>` remain distinct in direct, nested, and collection mappings. Generated filenames include a stable SHA-256 suffix to distinguish names that sanitize identically. Generic destinations and generic containing types are outside the current supported scope; their explicit rejection is planned in the next stage.
+Repeating the same source/destination pair is idempotent, including across partial declarations. Closed generic sources such as `Source<int>` and `Source<string>` remain distinct in direct, nested, and collection mappings. Generated filenames include a stable SHA-256 suffix to distinguish names that sanitize identically. Generic destinations and generic destination containers produce MFG006.
 
 ## Rename Members With MapProperty
 
@@ -114,7 +146,32 @@ public partial class UserDto
 }
 ```
 
-Transform methods must be static, visible to the generated partial type, accept the resolved source member type, and return a value assignable to the destination member.
+Transform methods must be accessible static ordinary methods, non-generic, non-void, with exactly one by-value parameter and a return type implicitly assignable to the destination member. Ref/out/in parameters are rejected. Overloads use the best implicit input conversion, preferring an exact match; missing, incompatible or ambiguous candidates produce MFG004. Transform exceptions propagate to the caller.
+
+## Null Policy
+
+| Input → destination | Behavior |
+| --- | --- |
+| Non-nullable → non-nullable | Copy, map or transform the value. |
+| Non-nullable → nullable | Allow; do not add a null value. |
+| Nullable → nullable | Preserve null for direct assignments and nested/collection mapping. |
+| Nullable → non-nullable | MFG008 unless an explicit transform declares nullable input and non-nullable output. |
+| Unannotated → non-nullable | MFG013 warning when a non-nullable obligation cannot be verified. |
+
+The policy covers nullable value types and reference annotations, including collection elements and nested generic annotations. For a nullable input and nullable destination, a transform with non-nullable input runs only for a non-null value. A transform declaring nullable input receives null and is responsible for its result contract. Nullable return values cannot feed non-nullable members.
+
+Every reference root API rejects null with `ArgumentNullException`. Non-nullable annotations are a static contract; generated mappings do not add a runtime null check to every property. Missing annotations remain visible through MFG013 rather than null-forgiving operators.
+
+As an example, an explicit fallback can satisfy a non-nullable destination:
+
+```csharp
+[MapTransform(nameof(Normalize))]
+public string Email { get; init; } = "";
+
+private static string Normalize(string? email) => email?.Trim() ?? "";
+```
+
+**Experimental API change:** `MapperForgeOptions` was a placeholder with no mapping behavior and has been removed. Remove references to `MapperForgeOptions.Default`; global configuration will require a future contract.
 
 ## Nested Mapping
 
@@ -166,12 +223,19 @@ public IReadOnlyList<AddressDto> KnownAddresses { get; set; } = [];
 
 | ID | Severity | Meaning |
 | --- | --- | --- |
-| MFG001 | Error | Destination type with `[MapFrom]` is not partial. |
+| MFG001 | Error | Destination or container declaring an attribute/marker map is not partial. |
 | MFG002 | Warning | Destination member could not be mapped from the source type. |
 | MFG003 | Error | Source and destination member types are incompatible. |
-| MFG004 | Error | Transform method was not found or has an invalid signature. |
+| MFG004 | Error | Transform method was not found or has an invalid or ambiguous signature. |
 | MFG005 | Error | Destination member has no accessible setter. |
+| MFG006 | Error | Unsupported type shape, accessibility, name or generated signature conflict. |
+| MFG007 | Error | No valid construction without arguments, or an unfulfilled required member. |
+| MFG008 | Error | Nullable value cannot satisfy a non-nullable obligation without explicit handling. |
+| MFG009 | Error (reserved) | Invalid/unavailable mapping dependency; detailed planning is scheduled in stage 6. |
+| MFG010 | Error (reserved) | Recursive mapping dependency; scheduled in stage 6. |
+| MFG011 | Error (reserved) | Incompatible, malformed or ambiguous external mapping contract; scheduled in stage 3. |
 | MFG012 | Error | Inherited interface members have incompatible declarations without a prevailing declaration. |
+| MFG013 | Warning | Source nullability is unknown for a non-nullable obligation. |
 
 ## Local Validation and Packaging
 

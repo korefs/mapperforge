@@ -20,9 +20,9 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
         var requests = context.SyntaxProvider
-            .ForAttributeWithMetadataName(
-                MappingParser.MapFromAttributeMetadataName,
-                static (node, _) => node is TypeDeclarationSyntax,
+            .CreateSyntaxProvider(
+                static (node, _) => node is TypeDeclarationSyntax { } declaration &&
+                    (declaration.AttributeLists.Count > 0 || declaration.BaseList is not null),
                 static (syntaxContext, _) => MappingParser.Parse(syntaxContext))
             .SelectMany(static (items, _) => items);
 
@@ -58,25 +58,52 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
 
     private static ImmutableArray<MappingPlan> BuildPlans(Compilation compilation, ImmutableArray<MappingRequest> requests)
     {
-        var builder = ImmutableArray.CreateBuilder<MappingPlan>();
         var mappingIndex = requests
             .GroupBy(static request => new MappingPair(request.SourceType, request.DestinationType))
             .ToDictionary(static group => group.Key, static group => group.First());
 
-        foreach (var request in mappingIndex.Values
+        var distinctRequests = mappingIndex.Values
             .OrderBy(static request => SymbolUtilities.GetStableTypeIdentity(request.DestinationType), System.StringComparer.Ordinal)
-            .ThenBy(static request => SymbolUtilities.GetStableTypeIdentity(request.SourceType), System.StringComparer.Ordinal))
-        {
-            builder.Add(BuildPlan(compilation, request, mappingIndex));
-        }
+            .ThenBy(static request => SymbolUtilities.GetStableTypeIdentity(request.SourceType), System.StringComparer.Ordinal).ToArray();
+        var declaredSources = distinctRequests.Select(static request => request.SourceType).ToArray();
 
-        return builder.ToImmutable();
+        while (true)
+        {
+            var plans = distinctRequests.Select(request => BuildPlan(compilation, request, mappingIndex, declaredSources)).ToImmutableArray();
+            var invalidPairs = plans.Where(static plan => plan.Diagnostics.Any(static diagnostic => diagnostic.Severity == DiagnosticSeverity.Error))
+                .Select(static plan => new MappingPair(plan.SourceType, plan.DestinationType)).ToArray();
+            var removed = false;
+            foreach (var invalid in invalidPairs) removed |= mappingIndex.Remove(invalid);
+            // Do not emit a call to a local From overload that was rejected. Detailed dependency
+            // diagnostics and recursive-graph validation are implemented in the dependency stage.
+            if (!removed)
+            {
+                return plans.Select(plan => new MappingPlan(plan.DestinationType, plan.SourceType, plan.Assignments, plan.Diagnostics,
+                    HasInheritedFrom(compilation, plan, plans))).ToImmutableArray();
+            }
+        }
+    }
+
+    private static bool HasInheritedFrom(Compilation compilation, MappingPlan plan, ImmutableArray<MappingPlan> plans)
+    {
+        for (var type = plan.DestinationType.BaseType; type is not null; type = type.BaseType)
+        {
+            if (type.GetMembers("From").Any(member => compilation.IsSymbolAccessibleWithin(member, plan.DestinationType) &&
+                (member is not IMethodSymbol || member is IMethodSymbol { Arity: 0, Parameters.Length: 1 } method &&
+                    method.Parameters[0].RefKind == RefKind.None &&
+                    SymbolEqualityComparer.Default.Equals(method.Parameters[0].Type, plan.SourceType)))) return true;
+            if (plans.Any(other => SymbolEqualityComparer.Default.Equals(other.DestinationType, type) &&
+                SymbolEqualityComparer.Default.Equals(other.SourceType, plan.SourceType) &&
+                !other.Diagnostics.Any(static diagnostic => diagnostic.Severity == DiagnosticSeverity.Error))) return true;
+        }
+        return false;
     }
 
     private static MappingPlan BuildPlan(
         Compilation compilation,
         MappingRequest request,
-        Dictionary<MappingPair, MappingRequest> mappingIndex)
+        Dictionary<MappingPair, MappingRequest> mappingIndex,
+        IEnumerable<ITypeSymbol> declaredSources)
     {
         var diagnostics = ImmutableArray.CreateBuilder<Diagnostic>();
         var assignments = ImmutableArray.CreateBuilder<MemberAssignment>();
@@ -100,7 +127,14 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
             }
         }
 
-        var sourceProperties = SymbolUtilities.GetProperties(request.SourceType, out var ambiguousSourceProperties)
+        if (!MappingValidation.ValidateTypes(compilation, request, declaredSources, diagnostics))
+            return new MappingPlan(request.DestinationType, request.SourceType, assignments.ToImmutable(), diagnostics.ToImmutable());
+        var constructor = MappingValidation.FindConstructor(compilation, request, diagnostics);
+        if (diagnostics.Any(static diagnostic => diagnostic.Severity == DiagnosticSeverity.Error))
+            return new MappingPlan(request.DestinationType, request.SourceType, assignments.ToImmutable(), diagnostics.ToImmutable());
+
+        var sourceType = (INamedTypeSymbol)request.SourceType;
+        var sourceProperties = SymbolUtilities.GetProperties(sourceType, out var ambiguousSourceProperties)
             .Where(static property =>
                 !property.IsStatic &&
                 !property.IsIndexer &&
@@ -112,7 +146,7 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
             .Where(static property => !property.IsStatic && !property.IsIndexer && !property.IsImplicitlyDeclared)
             .ToArray();
 
-        foreach (var ambiguity in ambiguousSourceProperties.Select(property => (Type: request.SourceType, Property: property))
+        foreach (var ambiguity in ambiguousSourceProperties.Select(property => (Type: sourceType, Property: property))
             .Concat(ambiguousDestinationProperties.Select(property => (Type: request.DestinationType, Property: property))))
         {
             diagnostics.Add(Diagnostic.Create(
@@ -158,63 +192,122 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
                 : "source";
             var sourceExpression = sourceReceiver + "." + SymbolUtilities.EscapeIdentifier(sourceProperty.Name);
             var transformMethodName = GetStringAttributeArgument(destinationProperty, "MapperForge.MapTransformAttribute");
+            var valueName = "__mfgValue" + assignments.Count;
+
+            if (sourceProperty.RefKind != RefKind.None || destinationProperty.RefKind != RefKind.None ||
+                sourceProperty.Type.TypeKind is TypeKind.Pointer or TypeKind.FunctionPointer ||
+                destinationProperty.Type.TypeKind is TypeKind.Pointer or TypeKind.FunctionPointer)
+            {
+                diagnostics.Add(Diagnostic.Create(MapperForgeDiagnostics.UnsupportedMapping, propertyLocation,
+                    request.SourceType.ToDisplayString(), request.DestinationType.ToDisplayString(),
+                    "member '" + destinationProperty.Name + "' has an unsupported ref or pointer signature"));
+                continue;
+            }
 
             if (transformMethodName is not null)
             {
-                var transformMethod = FindTransformMethod(compilation, request.DestinationType, transformMethodName, sourceProperty.Type, destinationProperty.Type);
+                var canLift = NullabilityPolicy.IsNullable(destinationProperty.Type) &&
+                    (NullabilityPolicy.IsNullable(sourceProperty.Type) || NullabilityPolicy.IsUnknown(sourceProperty.Type));
+                var transformMethod = TransformResolver.Find(compilation, request.DestinationType, transformMethodName,
+                    sourceProperty.Type, destinationProperty.Type);
 
                 if (transformMethod is null)
                 {
                     diagnostics.Add(Diagnostic.Create(
                         MapperForgeDiagnostics.TransformMethodInvalid,
                         propertyLocation,
-                        transformMethodName));
+                        transformMethodName,
+                        sourceProperty.Type.ToDisplayString(SymbolUtilities.FullyQualifiedNullableFormat),
+                        destinationProperty.Type.ToDisplayString(SymbolUtilities.FullyQualifiedNullableFormat)));
                     continue;
                 }
 
-                sourceExpression = transformMethod.Name + "(" + sourceExpression + ")";
-            }
-            else if (CanAssign(compilation, sourceProperty.Type, destinationProperty.Type))
-            {
-                // Direct assignment is preferred when it is type-safe.
-            }
-            else if (TryCreateNestedExpression(sourceProperty.Type, destinationProperty.Type, sourceExpression, mappingIndex, out var nestedExpression))
-            {
-                sourceExpression = nestedExpression;
-            }
-            else if (TryCreateCollectionExpression(sourceProperty.Type, destinationProperty.Type, sourceExpression, mappingIndex, out var collectionExpression))
-            {
-                sourceExpression = collectionExpression;
+                var parameterType = transformMethod.Parameters[0].Type;
+                var lift = canLift && NullabilityPolicy.IsNonNullable(parameterType);
+                if (NullabilityPolicy.IsNullable(sourceProperty.Type) && NullabilityPolicy.IsNonNullable(destinationProperty.Type) &&
+                    (!NullabilityPolicy.IsNullable(parameterType) || !NullabilityPolicy.IsNonNullable(transformMethod.ReturnType)))
+                {
+                    diagnostics.Add(Diagnostic.Create(MapperForgeDiagnostics.NullableToNonNullable, propertyLocation,
+                        sourceProperty.Type.ToDisplayString(SymbolUtilities.FullyQualifiedNullableFormat),
+                        destinationProperty.Type.ToDisplayString(SymbolUtilities.FullyQualifiedNullableFormat), destinationProperty.Name));
+                    continue;
+                }
+                if (!NullabilityPolicy.Validate(lift ? NullabilityPolicy.Unwrap(sourceProperty.Type) : sourceProperty.Type,
+                        parameterType, propertyLocation, destinationProperty.Name, diagnostics) ||
+                    !NullabilityPolicy.Validate(transformMethod.ReturnType, destinationProperty.Type,
+                        propertyLocation, destinationProperty.Name, diagnostics)) continue;
+
+                var receiver = transformMethod.ContainingType.ToDisplayString(SymbolUtilities.FullyQualifiedNullableFormat);
+                var input = lift ? valueName : sourceExpression;
+                var call = receiver + "." + SymbolUtilities.EscapeIdentifier(transformMethod.Name) + "((" +
+                    parameterType.ToDisplayString(SymbolUtilities.FullyQualifiedNullableFormat) + ")" + input + ")";
+                sourceExpression = lift ? sourceExpression + " is { } " + valueName + " ? " + call + " : null" : call;
             }
             else
             {
-                diagnostics.Add(Diagnostic.Create(
-                    MapperForgeDiagnostics.IncompatibleTypes,
-                    propertyLocation,
-                    sourceProperty.Name,
-                    sourceProperty.Type.ToDisplayString(SymbolUtilities.FullyQualifiedNullableFormat),
-                    destinationProperty.Name,
-                    destinationProperty.Type.ToDisplayString(SymbolUtilities.FullyQualifiedNullableFormat)));
-                continue;
+                if (!NullabilityPolicy.Validate(sourceProperty.Type, destinationProperty.Type,
+                    propertyLocation, destinationProperty.Name, diagnostics, checkTypeArguments: false)) continue;
+                if (CanAssign(compilation, sourceProperty.Type, destinationProperty.Type))
+                {
+                    if (!NullabilityPolicy.Validate(sourceProperty.Type, destinationProperty.Type,
+                        propertyLocation, destinationProperty.Name, diagnostics, checkRoot: false)) continue;
+                    if (destinationProperty.Type is INamedTypeSymbol { } namedDestination &&
+                        (namedDestination.Arity > 0 || namedDestination.ContainingType is not null) &&
+                        (!namedDestination.IsReferenceType || namedDestination.NullableAnnotation != NullableAnnotation.None) &&
+                        SymbolEqualityComparer.Default.Equals(sourceProperty.Type, destinationProperty.Type) &&
+                        !SymbolEqualityComparer.IncludeNullability.Equals(sourceProperty.Type, destinationProperty.Type))
+                    {
+                        // CLR-identical generic types can safely widen annotations after null-policy
+                        // validation. Spell the annotation conversion explicitly to avoid CS8619.
+                        var objectType = NullabilityPolicy.IsNullable(destinationProperty.Type) ? "object?" : "object";
+                        sourceExpression = "(" + destinationProperty.Type.ToDisplayString(SymbolUtilities.FullyQualifiedNullableFormat) +
+                            ")(" + objectType + ")" + sourceExpression;
+                    }
+                }
+                else if (TryCreateNestedExpression(sourceProperty.Type, destinationProperty.Type, sourceExpression,
+                    valueName, mappingIndex, out var nestedExpression))
+                {
+                    sourceExpression = nestedExpression;
+                }
+                else if (TryCreateCollectionExpression(sourceProperty.Type, destinationProperty.Type, sourceExpression,
+                    valueName, mappingIndex, propertyLocation, destinationProperty.Name, diagnostics, out var collectionExpression))
+                {
+                    if (collectionExpression.Length == 0) continue;
+                    sourceExpression = collectionExpression;
+                }
+                else
+                {
+                    diagnostics.Add(Diagnostic.Create(
+                        MapperForgeDiagnostics.IncompatibleTypes,
+                        propertyLocation,
+                        sourceProperty.Name,
+                        sourceProperty.Type.ToDisplayString(SymbolUtilities.FullyQualifiedNullableFormat),
+                        destinationProperty.Name,
+                        destinationProperty.Type.ToDisplayString(SymbolUtilities.FullyQualifiedNullableFormat)));
+                    continue;
+                }
             }
 
             assignments.Add(new MemberAssignment(destinationProperty.Name, sourceExpression));
         }
 
-        return new MappingPlan(request.DestinationType, request.SourceType, assignments.ToImmutable(), diagnostics.ToImmutable());
+        var mappedAssignments = assignments.ToImmutable();
+        MappingValidation.ValidateRequired(request, constructor, mappedAssignments, diagnostics);
+        return new MappingPlan(request.DestinationType, request.SourceType, mappedAssignments, diagnostics.ToImmutable());
     }
 
     private static bool TryCreateNestedExpression(
         ITypeSymbol sourceType,
         ITypeSymbol destinationType,
         string sourceExpression,
+        string valueName,
         Dictionary<MappingPair, MappingRequest> mappingIndex,
         out string expression)
     {
         expression = "";
 
-        if (sourceType is not INamedTypeSymbol sourceNamedType ||
-            destinationType is not INamedTypeSymbol destinationNamedType)
+        if (NullabilityPolicy.Unwrap(sourceType) is not INamedTypeSymbol sourceNamedType ||
+            NullabilityPolicy.Unwrap(destinationType) is not INamedTypeSymbol destinationNamedType)
         {
             return false;
         }
@@ -226,12 +319,10 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
         }
 
         var destinationTypeName = nestedMapping.DestinationType.ToDisplayString(SymbolUtilities.FullyQualifiedNullableFormat);
-        var guardedSourceExpression = IsNullable(sourceType) ? sourceExpression + "!" : sourceExpression;
-        var nestedCall = destinationTypeName + ".From(" + guardedSourceExpression + ")";
-
-        expression = IsNullable(sourceType) || IsNullable(destinationType)
-            ? sourceExpression + " is null ? null : " + nestedCall
-            : nestedCall;
+        var guard = NullabilityPolicy.IsNullable(sourceType) ||
+            NullabilityPolicy.IsUnknown(sourceType) && NullabilityPolicy.IsNullable(destinationType);
+        var nestedCall = destinationTypeName + ".From(" + (guard ? valueName : sourceExpression) + ")";
+        expression = guard ? sourceExpression + " is { } " + valueName + " ? " + nestedCall + " : null" : nestedCall;
 
         return true;
     }
@@ -240,7 +331,11 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
         ITypeSymbol sourceType,
         ITypeSymbol destinationType,
         string sourceExpression,
+        string valueName,
         Dictionary<MappingPair, MappingRequest> mappingIndex,
+        Location? location,
+        string member,
+        ImmutableArray<Diagnostic>.Builder diagnostics,
         out string expression)
     {
         expression = "";
@@ -248,8 +343,9 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
         var sourceElementType = TryGetEnumerableElementType(sourceType);
         var destinationElementType = TryGetSupportedDestinationCollectionElementType(destinationType);
 
-        if (sourceElementType is not INamedTypeSymbol sourceElementNamedType ||
-            destinationElementType is not INamedTypeSymbol destinationElementNamedType)
+        if (sourceElementType is null || destinationElementType is null ||
+            NullabilityPolicy.Unwrap(sourceElementType) is not INamedTypeSymbol sourceElementNamedType ||
+            NullabilityPolicy.Unwrap(destinationElementType) is not INamedTypeSymbol destinationElementNamedType)
         {
             return false;
         }
@@ -260,16 +356,28 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
             return false;
         }
 
-        var destinationElementTypeName = nestedMapping.DestinationType.ToDisplayString(SymbolUtilities.FullyQualifiedNullableFormat);
-        var collectionCall = "global::MapperForge.MapperForgeGeneratedExtensions.MapToList<" +
-            destinationElementTypeName +
-            ">(" +
-            (IsNullable(sourceType) ? sourceExpression + "!" : sourceExpression) +
-            ")";
+        if (!NullabilityPolicy.Validate(sourceElementType, destinationElementType, location, member, diagnostics)) return true;
 
-        expression = IsNullable(sourceType) || IsNullable(destinationType)
-            ? sourceExpression + " is null ? null : " + collectionCall
-            : collectionCall;
+        var destinationElementTypeName = nestedMapping.DestinationType.ToDisplayString(SymbolUtilities.FullyQualifiedNullableFormat);
+        var guard = NullabilityPolicy.IsNullable(sourceType) ||
+            NullabilityPolicy.IsUnknown(sourceType) && NullabilityPolicy.IsNullable(destinationType);
+        var collectionSource = guard ? valueName : sourceExpression;
+        string collectionCall;
+        if (NullabilityPolicy.IsNullable(sourceElementType) || NullabilityPolicy.IsNullable(destinationElementType))
+        {
+            var elementGuard = NullabilityPolicy.IsNullable(sourceElementType) || NullabilityPolicy.IsUnknown(sourceElementType);
+            var mapped = "(" + destinationElementType.ToDisplayString(SymbolUtilities.FullyQualifiedNullableFormat) + ")" +
+                destinationElementTypeName + ".From(" + (elementGuard ? "value" : "item") + ")";
+            var element = elementGuard ? "item is { } value ? " + mapped + " : null" : mapped;
+            collectionCall = "global::System.Linq.Enumerable.ToList(global::System.Linq.Enumerable.Select(" +
+                collectionSource + ", static item => " + element + "))";
+        }
+        else
+        {
+            collectionCall = "global::MapperForge.MapperForgeGeneratedExtensions.MapToList<" +
+                destinationElementTypeName + ">(" + collectionSource + ")";
+        }
+        expression = guard ? sourceExpression + " is { } " + valueName + " ? " + collectionCall + " : null" : collectionCall;
 
         return true;
     }
@@ -311,11 +419,6 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
             : null;
     }
 
-    private static bool IsNullable(ITypeSymbol type)
-    {
-        return type.NullableAnnotation == NullableAnnotation.Annotated;
-    }
-
     private static bool HasAttribute(ISymbol symbol, string metadataName)
     {
         return symbol.GetAttributes().Any(attribute => attribute.AttributeClass?.ToDisplayString() == metadataName);
@@ -346,49 +449,6 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
         return compilation.IsSymbolAccessibleWithin(setMethod, destinationType, destinationType);
     }
 
-    private static IMethodSymbol? FindTransformMethod(
-        Compilation compilation,
-        INamedTypeSymbol destinationType,
-        string methodName,
-        ITypeSymbol sourceType,
-        ITypeSymbol destinationMemberType)
-    {
-        for (var current = destinationType; current is not null; current = current.BaseType)
-        {
-            foreach (var member in current.GetMembers(methodName).OfType<IMethodSymbol>())
-            {
-                if (!member.IsStatic || member.Parameters.Length != 1 ||
-                    !compilation.IsSymbolAccessibleWithin(member, destinationType))
-                {
-                    continue;
-                }
-
-                if (!CanAssign(compilation, sourceType, member.Parameters[0].Type) ||
-                    !CanAssign(compilation, member.ReturnType, destinationMemberType))
-                {
-                    continue;
-                }
-
-                return member;
-            }
-        }
-
-        return null;
-    }
-
     private static bool CanAssign(Compilation compilation, ITypeSymbol sourceType, ITypeSymbol destinationType)
-    {
-        if (SymbolEqualityComparer.Default.Equals(sourceType, destinationType))
-        {
-            return true;
-        }
-
-        if (compilation is not CSharpCompilation csharpCompilation)
-        {
-            return false;
-        }
-
-        var conversion = csharpCompilation.ClassifyConversion(sourceType, destinationType);
-        return conversion.Exists && conversion.IsImplicit;
-    }
+        => TransformResolver.CanAssign(compilation, sourceType, destinationType);
 }

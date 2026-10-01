@@ -10,7 +10,8 @@ namespace MapperForge.Generator.Utilities;
 internal static class SymbolUtilities
 {
     public static readonly SymbolDisplayFormat FullyQualifiedNullableFormat = SymbolDisplayFormat.FullyQualifiedFormat
-        .WithMiscellaneousOptions(SymbolDisplayMiscellaneousOptions.IncludeNullableReferenceTypeModifier);
+        .WithMiscellaneousOptions(SymbolDisplayFormat.FullyQualifiedFormat.MiscellaneousOptions |
+            SymbolDisplayMiscellaneousOptions.IncludeNullableReferenceTypeModifier);
 
     public static bool IsPartial(INamedTypeSymbol type)
     {
@@ -62,8 +63,30 @@ internal static class SymbolUtilities
 
     public static string EscapeIdentifier(string identifier)
     {
-        return SyntaxFacts.GetKeywordKind(identifier) == SyntaxKind.None ? identifier : "@" + identifier;
+        return SyntaxFacts.GetKeywordKind(identifier) == SyntaxKind.None && SyntaxFacts.GetContextualKeywordKind(identifier) == SyntaxKind.None
+            ? identifier : "@" + identifier;
     }
+
+    public static string GetNamespaceName(INamespaceSymbol namespaceSymbol) => string.Join(".",
+        namespaceSymbol.ToDisplayString().Split('.').Select(EscapeIdentifier));
+
+    public static bool IsPubliclyAccessible(ITypeSymbol type)
+    {
+        if (type is IArrayTypeSymbol array) return IsPubliclyAccessible(array.ElementType);
+        if (type is not INamedTypeSymbol named) return false;
+        return named.DeclaredAccessibility == Accessibility.Public &&
+            (named.ContainingType is null || IsPubliclyAccessible(named.ContainingType)) &&
+            named.TypeArguments.All(IsPubliclyAccessible);
+    }
+
+    public static bool IsOpenType(ITypeSymbol type) => type switch
+    {
+        ITypeParameterSymbol => true,
+        IArrayTypeSymbol array => IsOpenType(array.ElementType),
+        INamedTypeSymbol named => named.IsUnboundGenericType || named.TypeArguments.Any(IsOpenType) ||
+            named.ContainingType is not null && IsOpenType(named.ContainingType),
+        _ => false
+    };
 
     public static ImmutableArray<IPropertySymbol> GetProperties(
         INamedTypeSymbol type, out ImmutableArray<IPropertySymbol> ambiguousProperties)

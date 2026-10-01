@@ -26,13 +26,15 @@ internal static class GeneratorTestHost
             "MapperForge.Generator.Tests.DynamicAssembly",
             new[] { syntaxTree },
             references,
-            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));
 
         var generator = new MapperForgeGenerator();
         GeneratorDriver driver = CSharpGeneratorDriver.Create(new[] { generator.AsSourceGenerator() }, parseOptions: parseOptions);
         driver = driver.RunGeneratorsAndUpdateCompilation(compilation, out var outputCompilation, out _);
 
         var runResult = driver.GetRunResult().Results.Single();
+        if (runResult.Exception is not null)
+            throw new InvalidOperationException("MapperForge generator failed during the test compilation.", runResult.Exception);
         var generatedSources = runResult.GeneratedSources
             .Select(static source => source.SourceText.ToString())
             .ToImmutableArray();

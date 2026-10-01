@@ -5,13 +5,13 @@ namespace MapperForge.Generator.Models;
 
 internal readonly struct MappingPair : IEquatable<MappingPair>
 {
-    public MappingPair(INamedTypeSymbol source, INamedTypeSymbol destination)
+    public MappingPair(ITypeSymbol source, INamedTypeSymbol destination)
     {
         Source = source;
         Destination = destination;
     }
 
-    private INamedTypeSymbol Source { get; }
+    private ITypeSymbol Source { get; }
     private INamedTypeSymbol Destination { get; }
 
     public bool Equals(MappingPair other) =>

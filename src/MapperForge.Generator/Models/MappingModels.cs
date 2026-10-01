@@ -1,11 +1,12 @@
 using System.Collections.Immutable;
 using Microsoft.CodeAnalysis;
+using MapperForge.Generator.Utilities;
 
 namespace MapperForge.Generator.Models;
 
 internal sealed class MappingRequest
 {
-    public MappingRequest(INamedTypeSymbol destinationType, INamedTypeSymbol sourceType, Location? location)
+    public MappingRequest(INamedTypeSymbol destinationType, ITypeSymbol sourceType, Location? location)
     {
         DestinationType = destinationType;
         SourceType = sourceType;
@@ -14,7 +15,7 @@ internal sealed class MappingRequest
 
     public INamedTypeSymbol DestinationType { get; }
 
-    public INamedTypeSymbol SourceType { get; }
+    public ITypeSymbol SourceType { get; }
 
     public Location? Location { get; }
 }
@@ -23,19 +24,26 @@ internal sealed class MappingPlan
 {
     public MappingPlan(
         INamedTypeSymbol destinationType,
-        INamedTypeSymbol sourceType,
+        ITypeSymbol sourceType,
         ImmutableArray<MemberAssignment> assignments,
-        ImmutableArray<Diagnostic> diagnostics)
+        ImmutableArray<Diagnostic> diagnostics,
+        bool hidesInheritedFrom = false)
     {
         DestinationType = destinationType;
         SourceType = sourceType;
         Assignments = assignments;
         Diagnostics = diagnostics;
+        HidesInheritedFrom = hidesInheritedFrom;
     }
 
     public INamedTypeSymbol DestinationType { get; }
 
-    public INamedTypeSymbol SourceType { get; }
+    public ITypeSymbol SourceType { get; }
+
+    public string MethodAccessibility => SymbolUtilities.IsPubliclyAccessible(SourceType) &&
+        SymbolUtilities.IsPubliclyAccessible(DestinationType) ? "public" : "internal";
+
+    public bool HidesInheritedFrom { get; }
 
     public ImmutableArray<MemberAssignment> Assignments { get; }
 
