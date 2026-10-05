@@ -30,7 +30,9 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
 
         context.RegisterSourceOutput(compilationAndRequests, static (sourceContext, pair) =>
         {
-            var plans = BuildPlans(pair.Left, pair.Right);
+            var catalog = ExternalMappingCatalog.Discover(pair.Left);
+            var helperName = MappingEmitter.GetHelperName(pair.Left);
+            var plans = BuildPlans(pair.Left, pair.Right, catalog, helperName);
 
             foreach (var plan in plans)
             {
@@ -49,27 +51,33 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
                 sourceContext.AddSource(MappingEmitter.GetHintName(plan), SourceText.From(MappingEmitter.EmitDestinationMapping(plan), Encoding.UTF8));
             }
 
-            if (validPlans.Length > 0)
+            var dispatch = validPlans.Select(static plan => new MappingEntry(new MappingPair(plan.SourceType, plan.DestinationType)))
+                .Concat(catalog.Values.Where(static entry => entry.ExternalAssembly is not null && entry.InvalidReason is null))
+                .GroupBy(static entry => entry.Pair).Select(static group => group.First()).ToImmutableArray();
+            if (dispatch.Length > 0)
             {
-                sourceContext.AddSource("MapperForgeGeneratedExtensions.g.cs", SourceText.From(MappingEmitter.EmitExtensions(validPlans), Encoding.UTF8));
+                sourceContext.AddSource("MapperForgeGeneratedExtensions.g.cs", SourceText.From(MappingEmitter.EmitExtensions(dispatch, helperName), Encoding.UTF8));
             }
         });
     }
 
-    private static ImmutableArray<MappingPlan> BuildPlans(Compilation compilation, ImmutableArray<MappingRequest> requests)
+    private static ImmutableArray<MappingPlan> BuildPlans(Compilation compilation, ImmutableArray<MappingRequest> requests,
+        Dictionary<MappingPair, MappingEntry> mappingIndex, string helperName)
     {
-        var mappingIndex = requests
+        var localRequests = requests
             .GroupBy(static request => new MappingPair(request.SourceType, request.DestinationType))
             .ToDictionary(static group => group.Key, static group => group.First());
+        foreach (var pair in localRequests.Keys) mappingIndex[pair] = new MappingEntry(pair);
 
-        var distinctRequests = mappingIndex.Values
+        var distinctRequests = localRequests.Values
             .OrderBy(static request => SymbolUtilities.GetStableTypeIdentity(request.DestinationType), System.StringComparer.Ordinal)
             .ThenBy(static request => SymbolUtilities.GetStableTypeIdentity(request.SourceType), System.StringComparer.Ordinal).ToArray();
-        var declaredSources = distinctRequests.Select(static request => request.SourceType).ToArray();
+        var declaredSources = mappingIndex.Values.Where(static entry => entry.InvalidReason is null)
+            .Select(static entry => entry.SourceType).ToArray();
 
         while (true)
         {
-            var plans = distinctRequests.Select(request => BuildPlan(compilation, request, mappingIndex, declaredSources)).ToImmutableArray();
+            var plans = distinctRequests.Select(request => BuildPlan(compilation, request, mappingIndex, declaredSources, helperName)).ToImmutableArray();
             var invalidPairs = plans.Where(static plan => plan.Diagnostics.Any(static diagnostic => diagnostic.Severity == DiagnosticSeverity.Error))
                 .Select(static plan => new MappingPair(plan.SourceType, plan.DestinationType)).ToArray();
             var removed = false;
@@ -78,8 +86,9 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
             // diagnostics and recursive-graph validation are implemented in the dependency stage.
             if (!removed)
             {
+                if (ExternalMappingCatalog.RejectDispatchConflicts(mappingIndex)) continue;
                 return plans.Select(plan => new MappingPlan(plan.DestinationType, plan.SourceType, plan.Assignments, plan.Diagnostics,
-                    HasInheritedFrom(compilation, plan, plans))).ToImmutableArray();
+                    HasInheritedFrom(compilation, plan, plans), plan.Dependencies)).ToImmutableArray();
             }
         }
     }
@@ -102,11 +111,13 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
     private static MappingPlan BuildPlan(
         Compilation compilation,
         MappingRequest request,
-        Dictionary<MappingPair, MappingRequest> mappingIndex,
-        IEnumerable<ITypeSymbol> declaredSources)
+        Dictionary<MappingPair, MappingEntry> mappingIndex,
+        IEnumerable<ITypeSymbol> declaredSources,
+        string helperName)
     {
         var diagnostics = ImmutableArray.CreateBuilder<Diagnostic>();
         var assignments = ImmutableArray.CreateBuilder<MemberAssignment>();
+        var dependencies = new HashSet<MappingPair>();
 
         if (!SymbolUtilities.IsPartial(request.DestinationType))
         {
@@ -265,12 +276,13 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
                     }
                 }
                 else if (TryCreateNestedExpression(sourceProperty.Type, destinationProperty.Type, sourceExpression,
-                    valueName, mappingIndex, out var nestedExpression))
+                    valueName, mappingIndex, propertyLocation, diagnostics, dependencies, out var nestedExpression))
                 {
+                    if (nestedExpression.Length == 0) continue;
                     sourceExpression = nestedExpression;
                 }
                 else if (TryCreateCollectionExpression(sourceProperty.Type, destinationProperty.Type, sourceExpression,
-                    valueName, mappingIndex, propertyLocation, destinationProperty.Name, diagnostics, out var collectionExpression))
+                    valueName, mappingIndex, propertyLocation, destinationProperty.Name, diagnostics, dependencies, helperName, out var collectionExpression))
                 {
                     if (collectionExpression.Length == 0) continue;
                     sourceExpression = collectionExpression;
@@ -293,7 +305,8 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
 
         var mappedAssignments = assignments.ToImmutable();
         MappingValidation.ValidateRequired(request, constructor, mappedAssignments, diagnostics);
-        return new MappingPlan(request.DestinationType, request.SourceType, mappedAssignments, diagnostics.ToImmutable());
+        return new MappingPlan(request.DestinationType, request.SourceType, mappedAssignments, diagnostics.ToImmutable(),
+            dependencies: dependencies.OrderBy(static pair => pair.StableIdentity, System.StringComparer.Ordinal).ToImmutableArray());
     }
 
     private static bool TryCreateNestedExpression(
@@ -301,7 +314,10 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
         ITypeSymbol destinationType,
         string sourceExpression,
         string valueName,
-        Dictionary<MappingPair, MappingRequest> mappingIndex,
+        Dictionary<MappingPair, MappingEntry> mappingIndex,
+        Location? location,
+        ImmutableArray<Diagnostic>.Builder diagnostics,
+        HashSet<MappingPair> dependencies,
         out string expression)
     {
         expression = "";
@@ -318,6 +334,9 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
             return false;
         }
 
+        if (!ValidateExternalEntry(nestedMapping, location, diagnostics)) return true;
+        dependencies.Add(mappingKey);
+
         var destinationTypeName = nestedMapping.DestinationType.ToDisplayString(SymbolUtilities.FullyQualifiedNullableFormat);
         var guard = NullabilityPolicy.IsNullable(sourceType) ||
             NullabilityPolicy.IsUnknown(sourceType) && NullabilityPolicy.IsNullable(destinationType);
@@ -332,10 +351,12 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
         ITypeSymbol destinationType,
         string sourceExpression,
         string valueName,
-        Dictionary<MappingPair, MappingRequest> mappingIndex,
+        Dictionary<MappingPair, MappingEntry> mappingIndex,
         Location? location,
         string member,
         ImmutableArray<Diagnostic>.Builder diagnostics,
+        HashSet<MappingPair> dependencies,
+        string helperName,
         out string expression)
     {
         expression = "";
@@ -356,7 +377,9 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
             return false;
         }
 
-        if (!NullabilityPolicy.Validate(sourceElementType, destinationElementType, location, member, diagnostics)) return true;
+        if (!ValidateExternalEntry(nestedMapping, location, diagnostics) ||
+            !NullabilityPolicy.Validate(sourceElementType, destinationElementType, location, member, diagnostics)) return true;
+        dependencies.Add(mappingKey);
 
         var destinationElementTypeName = nestedMapping.DestinationType.ToDisplayString(SymbolUtilities.FullyQualifiedNullableFormat);
         var guard = NullabilityPolicy.IsNullable(sourceType) ||
@@ -374,12 +397,21 @@ public sealed class MapperForgeGenerator : IIncrementalGenerator
         }
         else
         {
-            collectionCall = "global::MapperForge.MapperForgeGeneratedExtensions.MapToList<" +
+            collectionCall = "global::MapperForge." + helperName + ".MapToList<" +
                 destinationElementTypeName + ">(" + collectionSource + ")";
         }
         expression = guard ? sourceExpression + " is { } " + valueName + " ? " + collectionCall + " : null" : collectionCall;
 
         return true;
+    }
+
+    private static bool ValidateExternalEntry(MappingEntry entry, Location? location,
+        ImmutableArray<Diagnostic>.Builder diagnostics)
+    {
+        if (entry.InvalidReason is null) return true;
+        diagnostics.Add(Diagnostic.Create(MapperForgeDiagnostics.InvalidExternalContract, location,
+            entry.ExternalAssembly, entry.InvalidReason));
+        return false;
     }
 
     private static ITypeSymbol? TryGetEnumerableElementType(ITypeSymbol type)

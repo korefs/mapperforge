@@ -23,6 +23,19 @@ internal static class MappingEmitter
         builder.AppendLine("using System.CodeDom.Compiler;");
         builder.AppendLine();
 
+        if (plan.MethodAccessibility == "public")
+        {
+            builder.Append("[assembly: global::MapperForge.MapperForgeMappingAttribute(typeof(")
+                .Append(plan.SourceType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat))
+                .Append("), typeof(").Append(destination.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat))
+                .Append("), 1");
+            foreach (var dependency in plan.Dependencies.OrderBy(static pair => pair.StableIdentity, System.StringComparer.Ordinal))
+                builder.Append(", typeof(").Append(dependency.Source.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat))
+                    .Append("), typeof(").Append(dependency.Destination.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)).Append(')');
+            builder.AppendLine(")]");
+            builder.AppendLine();
+        }
+
         var namespaceName = destination.ContainingNamespace.IsGlobalNamespace
             ? null
             : SymbolUtilities.GetNamespaceName(destination.ContainingNamespace);
@@ -101,7 +114,7 @@ internal static class MappingEmitter
         return builder.ToString();
     }
 
-    public static string EmitExtensions(ImmutableArray<MappingPlan> plans)
+    public static string EmitExtensions(ImmutableArray<MappingEntry> plans, string helperName)
     {
         var groupedPlans = plans
             .GroupBy(static plan => plan.SourceType, SymbolEqualityComparer.Default)
@@ -118,13 +131,13 @@ internal static class MappingEmitter
         builder.AppendLine("namespace MapperForge;");
         builder.AppendLine();
         builder.AppendLine("[global::System.CodeDom.Compiler.GeneratedCode(\"MapperForge\", \"0.1.0\")]");
-        builder.AppendLine("public static partial class MapperForgeGeneratedExtensions");
+        builder.Append("internal static class ").AppendLine(helperName);
         builder.AppendLine("{");
 
         foreach (var group in groupedPlans)
         {
             var sourceTypeName = group.Key!.ToDisplayString(SymbolUtilities.FullyQualifiedNullableFormat);
-            var accessibility = SymbolUtilities.IsPubliclyAccessible((ITypeSymbol)group.Key) ? "public" : "internal";
+            const string accessibility = "internal";
             builder.Append("    ").Append(accessibility).Append(" static TDestination MapTo<TDestination>(this ")
                 .Append(sourceTypeName)
                 .AppendLine(" source)");
@@ -141,6 +154,7 @@ internal static class MappingEmitter
                     .AppendLine("))");
                 builder.AppendLine("        {");
                 builder.Append("            return (TDestination)(object)")
+                    .Append('(').Append(destinationTypeName).Append(')')
                     .Append(destinationTypeName)
                     .AppendLine(".From(source);");
                 builder.AppendLine("        }");
@@ -171,7 +185,8 @@ internal static class MappingEmitter
             builder.AppendLine();
             builder.AppendLine("        foreach (var item in source)");
             builder.AppendLine("        {");
-            builder.AppendLine("            results.Add(item.MapTo<TDestination>());");
+            builder.Append("            results.Add(global::MapperForge.").Append(helperName)
+                .AppendLine(".MapTo<TDestination>(item));");
             builder.AppendLine("        }");
             builder.AppendLine();
             builder.AppendLine("        return results;");
@@ -182,7 +197,8 @@ internal static class MappingEmitter
                 .Append(sourceTypeName)
                 .AppendLine("> source)");
             builder.AppendLine("    {");
-            builder.AppendLine("        return source.MapToList<TDestination>();");
+            builder.Append("        return global::MapperForge.").Append(helperName)
+                .AppendLine(".MapToList<TDestination>(source);");
             builder.AppendLine("    }");
             builder.AppendLine();
         }
@@ -212,5 +228,13 @@ internal static class MappingEmitter
             .Select(static value => value.ToString("x2", System.Globalization.CultureInfo.InvariantCulture)));
         return Sanitize(plan.DestinationType.ToDisplayString()) + "_From_" +
             Sanitize(plan.SourceType.ToDisplayString()) + "_" + hash + ".g.cs";
+    }
+
+    public static string GetHelperName(Compilation compilation)
+    {
+        using var sha256 = SHA256.Create();
+        var hash = string.Concat(sha256.ComputeHash(Encoding.UTF8.GetBytes(compilation.Assembly.Identity.ToString()))
+            .Select(static value => value.ToString("x2", System.Globalization.CultureInfo.InvariantCulture)));
+        return "MapperForgeGeneratedExtensions_" + hash;
     }
 }

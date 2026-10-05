@@ -27,13 +27,15 @@ internal sealed class MappingPlan
         ITypeSymbol sourceType,
         ImmutableArray<MemberAssignment> assignments,
         ImmutableArray<Diagnostic> diagnostics,
-        bool hidesInheritedFrom = false)
+        bool hidesInheritedFrom = false,
+        ImmutableArray<MappingPair> dependencies = default)
     {
         DestinationType = destinationType;
         SourceType = sourceType;
         Assignments = assignments;
         Diagnostics = diagnostics;
         HidesInheritedFrom = hidesInheritedFrom;
+        Dependencies = dependencies.IsDefault ? ImmutableArray<MappingPair>.Empty : dependencies;
     }
 
     public INamedTypeSymbol DestinationType { get; }
@@ -48,6 +50,27 @@ internal sealed class MappingPlan
     public ImmutableArray<MemberAssignment> Assignments { get; }
 
     public ImmutableArray<Diagnostic> Diagnostics { get; }
+
+    public ImmutableArray<MappingPair> Dependencies { get; }
+}
+
+internal sealed class MappingEntry
+{
+    public MappingEntry(MappingPair pair, string? externalAssembly = null, string? invalidReason = null,
+        ImmutableArray<MappingPair> dependencies = default)
+    {
+        Pair = pair;
+        ExternalAssembly = externalAssembly;
+        InvalidReason = invalidReason;
+        Dependencies = dependencies.IsDefault ? ImmutableArray<MappingPair>.Empty : dependencies;
+    }
+
+    public MappingPair Pair { get; }
+    public ITypeSymbol SourceType => Pair.Source;
+    public INamedTypeSymbol DestinationType => Pair.Destination;
+    public string? ExternalAssembly { get; }
+    public string? InvalidReason { get; }
+    public ImmutableArray<MappingPair> Dependencies { get; }
 }
 
 internal sealed class MemberAssignment

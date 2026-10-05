@@ -37,8 +37,8 @@ public sealed class MapperForgeGeneratorTests
 
         var generated = string.Join(Environment.NewLine, result.GeneratedSources);
         generated.Should().Contain("UserDto.From(source)");
-        generated.Should().Contain("public static global::System.Collections.Generic.List<TDestination> MapTo<TDestination>(this global::System.Collections.Generic.IEnumerable<global::Demo.User> source)");
-        generated.Should().Contain("return source.MapToList<TDestination>();");
+        generated.Should().Contain("internal static global::System.Collections.Generic.List<TDestination> MapTo<TDestination>(this global::System.Collections.Generic.IEnumerable<global::Demo.User> source)");
+        generated.Should().MatchRegex(@"return global::MapperForge.MapperForgeGeneratedExtensions_[a-f0-9]{64}\.MapToList<TDestination>\(source\);");
         generated.Should().NotContain("System.Reflection");
         generated.Should().NotContain("GetProperty");
         generated.Should().NotContain("Invoke");
@@ -93,8 +93,8 @@ public sealed class MapperForgeGeneratorTests
         var generated = string.Join(Environment.NewLine, result.GeneratedSources);
         generated.Should().Contain("Address = global::Demo.AddressDto.From(source.Address)");
         generated.Should().Contain("BillingAddress = source.BillingAddress is { } __mfgValue1 ? global::Demo.AddressDto.From(__mfgValue1) : null");
-        generated.Should().Contain("PreviousAddresses = global::MapperForge.MapperForgeGeneratedExtensions.MapToList<global::Demo.AddressDto>(source.PreviousAddresses)");
-        generated.Should().Contain("KnownAddresses = global::MapperForge.MapperForgeGeneratedExtensions.MapToList<global::Demo.AddressDto>(source.KnownAddresses)");
+        generated.Should().MatchRegex(@"PreviousAddresses = global::MapperForge.MapperForgeGeneratedExtensions_[a-f0-9]{64}\.MapToList<global::Demo.AddressDto>\(source.PreviousAddresses\)");
+        generated.Should().MatchRegex(@"KnownAddresses = global::MapperForge.MapperForgeGeneratedExtensions_[a-f0-9]{64}\.MapToList<global::Demo.AddressDto>\(source.KnownAddresses\)");
     }
 
     [Theory]

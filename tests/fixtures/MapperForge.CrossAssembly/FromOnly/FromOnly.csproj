@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="MapperForge" Version="$(MapperForgePackageVersion)" ExcludeAssets="analyzers" />
+    <ProjectReference Include="../Library/Library.csproj" />
+  </ItemGroup>
+  <!-- SDK 9.0.201 still adds this analyzer from package files despite ExcludeAssets. -->
+  <Target Name="RemoveMapperForgeAnalyzer" AfterTargets="ResolveLockFileAnalyzers">
+    <ItemGroup>
+      <Analyzer Remove="@(Analyzer)" Condition="'%(Analyzer.Filename)' == 'MapperForge.Generator'" />
+    </ItemGroup>
+  </Target>
+</Project>

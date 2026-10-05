@@ -2,6 +2,7 @@
 """Pack a clean source copy and execute a package-only consumer with isolated caches."""
 
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -11,17 +12,19 @@ import xml.etree.ElementTree as ET
 
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "1.0.0-stage1-validation"
+VERSION = "1.0.0-stage3-validation"
 
 
-def run(args, cwd, env, expect_failure=False):
+def run(args, cwd, env, expect_failure=False, expected_error="MapperForge generator assembly is missing"):
     print("+ " + " ".join(map(str, args)), flush=True)
     result = subprocess.run(list(map(str, args)), cwd=cwd, env=env, text=True,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     print(result.stdout, flush=True)
     if expect_failure:
-        if result.returncode == 0 or "MapperForge generator assembly is missing" not in result.stdout:
-            raise RuntimeError("Pack must explicitly reject a missing generator assembly")
+        if result.returncode == 0 or expected_error not in result.stdout:
+            raise RuntimeError(f"Command must explicitly fail with {expected_error}")
+        if expected_error == "MFG011" and re.search(r"error CS\d+", result.stdout):
+            raise RuntimeError("Invalid metadata produced compiler errors instead of a controlled diagnostic")
     elif result.returncode:
         raise RuntimeError(f"Command failed with exit code {result.returncode}")
 
@@ -79,6 +82,25 @@ def main():
             run(["dotnet", "run", "--project", consumer, "-c", "Release", "--no-restore",
                  f"-p:MapperForgePackageVersion={VERSION}"], workspace, consumer_env)
 
+            cross = workspace / f"cross-assembly-{mode}"
+            shutil.copytree(ROOT / "tests/fixtures/MapperForge.CrossAssembly", cross,
+                            ignore=shutil.ignore_patterns("bin", "obj"))
+            shutil.copy2(consumer_config, cross / "NuGet.Config")
+            cross_env = dict(env, NUGET_PACKAGES=str(workspace / f"cross-cache-{mode}"))
+            for name in ("Consumer", "FromOnly"):
+                cross_project = cross / name / f"{name}.csproj"
+                run(["dotnet", "restore", cross_project, "--configfile", cross / "NuGet.Config",
+                     f"-p:MapperForgePackageVersion={VERSION}"], workspace, cross_env)
+                run(["dotnet", "run", "--project", cross_project, "-c", "Release", "--no-restore",
+                     f"-p:MapperForgePackageVersion={VERSION}"], workspace, cross_env)
+            contract_project = cross / "ContractConsumer/ContractConsumer.csproj"
+            run(["dotnet", "restore", contract_project, "--configfile", cross / "NuGet.Config",
+                 f"-p:MapperForgePackageVersion={VERSION}"], workspace, cross_env)
+            for case in ("INVALID_VERSION", "INVALID_DEPENDENCIES", "INVALID_SIGNATURE"):
+                run(["dotnet", "build", contract_project, "-c", "Release", "--no-restore",
+                     f"-p:MapperForgePackageVersion={VERSION}", f"-p:MapperForgeContractCase={case}"],
+                    workspace, cross_env, expect_failure=True, expected_error="MFG011")
+
         # Keep this failure test in the temporary copy; never alter the working tree's build output.
         generator = repo / "src/MapperForge.Generator/bin/Release/netstandard2.0/MapperForge.Generator.dll"
         generator.rename(generator.with_suffix(".missing"))
@@ -87,7 +109,8 @@ def main():
             repo, env, expect_failure=True)
         if list(failed_output.glob("*.nupkg")):
             raise RuntimeError("Pack produced a package despite the missing generator")
-        print("Package validation passed (clean pack, build/pack --no-build, missing analyzer).", flush=True)
+        print("Package validation passed (clean pack, build/pack --no-build, cross-assembly consumers, "
+              "From without analyzer, incompatible contracts and missing analyzer).", flush=True)
 
 
 if __name__ == "__main__":

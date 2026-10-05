@@ -11,8 +11,11 @@ internal readonly struct MappingPair : IEquatable<MappingPair>
         Destination = destination;
     }
 
-    private ITypeSymbol Source { get; }
-    private INamedTypeSymbol Destination { get; }
+    public ITypeSymbol Source { get; }
+    public INamedTypeSymbol Destination { get; }
+
+    public string StableIdentity => Utilities.SymbolUtilities.GetStableTypeIdentity(Source) + "->" +
+        Utilities.SymbolUtilities.GetStableTypeIdentity(Destination);
 
     public bool Equals(MappingPair other) =>
         SymbolEqualityComparer.Default.Equals(Source, other.Source) &&

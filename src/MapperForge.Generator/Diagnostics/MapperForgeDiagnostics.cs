@@ -19,7 +19,7 @@ internal static class MapperForgeDiagnostics
         "Cannot map nullable type '{0}' to non-nullable type '{1}' for member '{2}'. Use a transform with nullable input and non-nullable output.",
         Category, DiagnosticSeverity.Error, isEnabledByDefault: true);
 
-    // Reserved for dependency planning, recursive maps and external contracts in subsequent stages.
+    // Reserved for dependency planning and recursive maps in subsequent stages.
     public static readonly DiagnosticDescriptor InvalidDependency = new(
         "MFG009", "Mapping dependency is unavailable", "Mapping dependency from '{0}' to '{1}' is invalid or unavailable for '{2}'.",
         Category, DiagnosticSeverity.Error, isEnabledByDefault: true);

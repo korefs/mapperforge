@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using System.Reflection;
+using System.Runtime.Loader;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using MapperForge.Generator;
@@ -9,6 +10,9 @@ namespace MapperForge.Generator.Tests;
 internal static class GeneratorTestHost
 {
     public static GeneratorRunResult Run(string source, params MetadataReference[] additionalReferences)
+        => RunNamed("MapperForge.Generator.Tests.DynamicAssembly", source, additionalReferences);
+
+    public static GeneratorRunResult RunNamed(string assemblyName, string source, params MetadataReference[] additionalReferences)
     {
         var parseOptions = CSharpParseOptions.Default.WithLanguageVersion(LanguageVersion.CSharp12);
         var syntaxTree = CSharpSyntaxTree.ParseText(source, parseOptions);
@@ -23,7 +27,7 @@ internal static class GeneratorTestHost
         references.AddRange(additionalReferences);
 
         var compilation = CSharpCompilation.Create(
-            "MapperForge.Generator.Tests.DynamicAssembly",
+            assemblyName,
             new[] { syntaxTree },
             references,
             new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));
@@ -43,7 +47,7 @@ internal static class GeneratorTestHost
             runResult.GeneratedSources.Select(static source => source.HintName).ToImmutableArray());
     }
 
-    public static T Execute<T>(GeneratorRunResult result)
+    public static T Execute<T>(GeneratorRunResult result, params GeneratorRunResult[] dependencies)
     {
         using var stream = new MemoryStream();
         var emitted = result.Compilation.Emit(stream);
@@ -52,14 +56,33 @@ internal static class GeneratorTestHost
             throw new InvalidOperationException(string.Join(Environment.NewLine, emitted.Diagnostics));
         }
 
-        var assembly = Assembly.Load(stream.ToArray());
-        return (T)assembly.GetType("Probe")!.GetMethod("Run")!.Invoke(null, null)!;
+        var context = new AssemblyLoadContext(Guid.NewGuid().ToString(), isCollectible: true);
+        context.Resolving += (_, name) =>
+        {
+            var dependency = dependencies.SingleOrDefault(item => item.Compilation.AssemblyName == name.Name);
+            if (dependency is null) return null;
+            using var dependencyStream = new MemoryStream();
+            var dependencyEmit = dependency.Compilation.Emit(dependencyStream);
+            if (!dependencyEmit.Success) throw new InvalidOperationException(string.Join(Environment.NewLine, dependencyEmit.Diagnostics));
+            dependencyStream.Position = 0;
+            return context.LoadFromStream(dependencyStream);
+        };
+        try
+        {
+            stream.Position = 0;
+            var assembly = context.LoadFromStream(stream);
+            return (T)assembly.GetType("Probe")!.GetMethod("Run")!.Invoke(null, null)!;
+        }
+        finally { context.Unload(); }
     }
 
     public static MetadataReference CreateReference(string source)
+        => CreateReference(RunNamed("MapperForge.Generator.Tests.BaseAssembly", source));
+
+    public static MetadataReference CreateReference(GeneratorRunResult result)
     {
         using var stream = new MemoryStream();
-        var emitted = Run(source).Compilation.WithAssemblyName("MapperForge.Generator.Tests.BaseAssembly").Emit(stream);
+        var emitted = result.Compilation.Emit(stream);
         if (!emitted.Success)
         {
             throw new InvalidOperationException(string.Join(Environment.NewLine, emitted.Diagnostics));

@@ -1,0 +1,10 @@
+<Project>
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>12.0</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <MapperForgePackageVersion Condition="'$(MapperForgePackageVersion)' == ''">1.0.0</MapperForgePackageVersion>
+  </PropertyGroup>
+</Project>

@@ -6,6 +6,7 @@ using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using MapperForge.Generator.Diagnostics;
 using MapperForge.Generator.Models;
+using MapperForge.Generator.Emitting;
 
 namespace MapperForge.Generator.Utilities;
 
@@ -41,7 +42,8 @@ internal static class MappingValidation
             reason = "an existing member conflicts with the generated From signature";
         }
 
-        var helper = compilation.GetTypeByMetadataName("MapperForge.MapperForgeGeneratedExtensions");
+        var helper = compilation.GetTypeByMetadataName("MapperForge.MapperForgeGeneratedExtensions") ??
+            compilation.GetTypeByMetadataName("MapperForge." + MappingEmitter.GetHelperName(compilation));
         if (reason is null && helper is not null && SymbolEqualityComparer.Default.Equals(helper.ContainingAssembly, compilation.Assembly))
         {
             reason = "MapperForge.MapperForgeGeneratedExtensions is reserved for generated methods";
