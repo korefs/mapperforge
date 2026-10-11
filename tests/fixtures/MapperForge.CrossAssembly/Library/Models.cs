@@ -37,3 +37,10 @@ public class DependencySource;
 public class DependencyDto { public static DependencyDto From(DependencySource source) => new(); }
 public class SignatureSource;
 public class SignatureDto { public static string From(SignatureSource source) => ""; }
+
+[MapFrom(typeof(Source))]
+public partial record ImmutableDto(int Id);
+
+[MapFrom(typeof(Root))]
+public partial record ImmutableRootDto(
+    ImmutableDto Child, ImmutableDto? Optional, List<ImmutableDto?>? Items, IReadOnlyList<ImmutableDto> Known);

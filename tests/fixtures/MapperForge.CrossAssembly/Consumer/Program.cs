@@ -22,7 +22,19 @@ catch (ArgumentNullException) { }
 try { source.MapTo<SignatureDto>(); throw new InvalidOperationException("Expected unavailable map."); }
 catch (MapperForgeMappingException) { }
 
-Console.WriteLine("Cross-assembly consumer passed: From, MapTo, collections, nested maps and null policy.");
+var immutable = source.MapTo<ImmutableDto>();
+var constructed = ConstructedRoot.From(new Root
+{
+    Child = source, Items = new() { source, null }, Known = new() { source }
+});
+var libraryImmutable = new Root { Child = source }.MapTo<ImmutableRootDto>();
+if (immutable.Id != 42 || items.MapToList<ImmutableDto>()[0].Id != 42 ||
+    constructed.Child.Id != 42 || constructed.Optional is not null || constructed.Items?[0]?.Id != 42 ||
+    constructed.Items[1] is not null || constructed.Known[0].Id != 42 ||
+    libraryImmutable.Child.Id != 42 || libraryImmutable.Optional is not null)
+    throw new InvalidOperationException("Immutable cross-assembly mapping failed.");
+
+Console.WriteLine("Cross-assembly consumer passed: From, MapTo, collections, nested maps, immutable construction and null policy.");
 
 [MapFrom(typeof(Source))]
 public partial class DtoB { public int Id { get; init; } }
@@ -35,3 +47,7 @@ public partial class LocalRoot
     public List<DtoA?>? Items { get; init; }
     public IReadOnlyList<DtoA> Known { get; init; } = new List<DtoA>();
 }
+
+[MapFrom(typeof(Root))]
+public partial record ConstructedRoot(
+    ImmutableDto Child, ImmutableDto? Optional, List<ImmutableDto?>? Items, IReadOnlyList<ImmutableDto> Known);

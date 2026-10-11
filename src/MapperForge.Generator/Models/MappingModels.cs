@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Linq;
 using Microsoft.CodeAnalysis;
 using MapperForge.Generator.Utilities;
 
@@ -28,8 +29,10 @@ internal sealed class MappingPlan
         ImmutableArray<MemberAssignment> assignments,
         ImmutableArray<Diagnostic> diagnostics,
         bool hidesInheritedFrom = false,
-        ImmutableArray<MappingPair> dependencies = default)
+        ImmutableArray<MappingPair> dependencies = default,
+        ConstructionPlan? construction = null)
     {
+        Construction = construction;
         DestinationType = destinationType;
         SourceType = sourceType;
         Assignments = assignments;
@@ -46,6 +49,8 @@ internal sealed class MappingPlan
         SymbolUtilities.IsPubliclyAccessible(DestinationType) ? "public" : "internal";
 
     public bool HidesInheritedFrom { get; }
+
+    public ConstructionPlan? Construction { get; }
 
     public ImmutableArray<MemberAssignment> Assignments { get; }
 
@@ -83,5 +88,33 @@ internal sealed class MemberAssignment
 
     public string DestinationName { get; }
 
+    public string Expression { get; }
+}
+
+internal sealed class ConstructionPlan
+{
+    public ConstructionPlan(IMethodSymbol constructor, ImmutableArray<ConstructorArgument> arguments,
+        ImmutableArray<IPropertySymbol> satisfiedMembers)
+    {
+        Constructor = constructor;
+        Arguments = arguments;
+        SatisfiedMembers = satisfiedMembers;
+    }
+
+    public IMethodSymbol Constructor { get; }
+    public ImmutableArray<ConstructorArgument> Arguments { get; }
+    public ImmutableArray<IPropertySymbol> SatisfiedMembers { get; }
+    public int RequiredArguments => Arguments.Count(argument => !argument.Parameter.IsOptional && !argument.Parameter.IsParams);
+}
+
+internal sealed class ConstructorArgument
+{
+    public ConstructorArgument(IParameterSymbol parameter, string expression)
+    {
+        Parameter = parameter;
+        Expression = expression;
+    }
+
+    public IParameterSymbol Parameter { get; }
     public string Expression { get; }
 }

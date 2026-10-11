@@ -151,8 +151,8 @@ public sealed class ExternalMappingTests
             public static class Probe { public static int Run() => new GoodSource().MapTo<GoodDto>().Id; }
             """, reference);
         ContractTestAssertions.Rejects(used, "MFG011");
-        used.Diagnostics.Where(diagnostic => diagnostic.Id == "MFG011").Should().ContainSingle()
-            .Which.Location.IsInSource.Should().BeTrue();
+        used.Diagnostics.Should().ContainSingle().Which.Id.Should().Be("MFG011");
+        used.Diagnostics[0].Location.IsInSource.Should().BeTrue();
         used.GeneratedSources.Should().HaveCount(2);
         GeneratorTestHost.Execute<int>(used, library).Should().Be(42);
 

@@ -2,6 +2,8 @@ using Fixture;
 using MapperForge;
 
 if (DtoA.From(new Source { Id = 42 }).Id != 42 ||
+    ImmutableDto.From(new Source { Id = 42 }).Id != 42 ||
+    ImmutableRootDto.From(new Root { Child = new Source { Id = 42 } }).Child.Id != 42 ||
     typeof(UnmappedDto).GetMethod("From") is not null ||
     typeof(UnmappedDto).Assembly.GetTypes().Any(type => type.Name.StartsWith("MapperForgeGeneratedExtensions")))
     throw new InvalidOperationException("From-only consumer or analyzer exclusion failed.");

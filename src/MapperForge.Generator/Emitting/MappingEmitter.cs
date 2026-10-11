@@ -80,13 +80,18 @@ internal static class MappingEmitter
             builder.Append(bodyIndent).AppendLine("    global::System.ArgumentNullException.ThrowIfNull(source);");
         builder.AppendLine();
 
+        var arguments = string.Join(", ", plan.Construction!.Arguments.Select((argument, index) =>
+            (argument.Parameter.Ordinal == index ? "" : SymbolUtilities.EscapeIdentifier(argument.Parameter.Name) + ": ") + "(" +
+            argument.Parameter.Type.ToDisplayString(SymbolUtilities.FullyQualifiedNullableFormat) + ")(" + argument.Expression + ")"));
+        builder.Append(bodyIndent).Append("    return new ").Append(destinationTypeName)
+            .Append('(').Append(arguments).Append(')');
         if (plan.Assignments.Length == 0)
         {
-            builder.Append(bodyIndent).Append("    return new ").Append(destinationTypeName).AppendLine("();");
+            builder.AppendLine(";");
         }
         else
         {
-            builder.Append(bodyIndent).Append("    return new ").Append(destinationTypeName).AppendLine();
+            builder.AppendLine();
             builder.Append(bodyIndent).AppendLine("    {");
 
             foreach (var assignment in plan.Assignments)

@@ -169,8 +169,8 @@ Non-nullable annotations are a static contract; generated code does not check ev
 | Sources | Accessible named classes, structs, records, and interfaces, including closed generics. |
 | Destinations | Accessible concrete, non-generic partial classes, structs, records, and record structs. |
 | Nested destinations | Accessible non-generic partial containers; static class containers are allowed. |
-| Construction | An unambiguous constructor callable without arguments, including private destination constructors and optional/`params` constructors. Required members must be mapped or covered by `[SetsRequiredMembers]`. |
-| Properties | Public source getters and destination setters or `init` accessors accessible from the destination. Fields, indexers, and static properties are not mapped. Ignore computed properties with `[MapIgnore]`. |
+| Construction | Deterministic accessible constructor selection, including private constructors, positional records, optional defaults and `params`. Constructor arguments and remaining initializers reuse property mapping rules. Required members need an initializer or `[SetsRequiredMembers]`. |
+| Properties | Public source getters; destination getters satisfied by construction, or setters/`init` accessible from the destination. Fields, indexers, and static properties are not mapped. Ignore other computed properties with `[MapIgnore]`. |
 | Inheritance | Source and destination base properties are included; the most derived declaration wins for `override` and `new`. Overrides use their own mapping attributes. |
 | Interfaces | Inherited source properties are supported. Incompatible declarations require a prevailing declaration on a derived interface (MFG012). |
 | Visibility | Public and internal models work. `From` becomes internal when either model is effectively internal; inaccessible nested/file-local types are rejected. |
@@ -178,9 +178,32 @@ Non-nullable annotations are a static contract; generated code does not check ev
 | Existing methods | Other `From` overloads remain available; a conflicting `From(Source)` signature is rejected. `MapperForge.MapperForgeGeneratedExtensions` is a reserved type name. |
 
 > [!IMPORTANT]
-> Constructor-argument mapping, positional destinations requiring arguments, generic destinations/containers, abstract or static destinations, ref structs, open generic sources, and ref/pointer property signatures are unsupported. Recursive-map validation is not implemented. Use acyclic mapping graphs; cyclic input graphs can recurse indefinitely.
+> Generic destinations/containers, abstract or static destinations, ref structs, open generic sources, and ref/pointer property signatures are unsupported. Recursive-map validation is not implemented. Use acyclic mapping graphs; cyclic input graphs can recurse indefinitely.
 
 A source map declared for `IEnumerable<T>` is also rejected when a map for `T` would generate a conflicting collection extension. Array property materialization and collection conversions beyond the forms described above remain future work.
+
+### Constructors, positional records and required members
+
+```csharp
+[MapFrom(typeof(User))]
+public partial record ImmutableUserDto(
+    int Id,
+    [property: MapProperty(nameof(User.DisplayName))] string Name,
+    [property: MapTransform("NormalizeEmail")] string Email)
+{
+    private static string NormalizeEmail(string email) => email.Trim().ToLowerInvariant();
+}
+```
+
+Put attributes on a positional record's generated property with `property:`. The same attributes work on explicitly declared properties associated with constructor parameters. Parameter attributes do not define a mapping contract.
+
+A valid constructor with zero parameters is preserved. Otherwise, the generator considers constructors accessible from the destination's partial declaration, including private constructors. It chooses the valid candidate resolving the most mandatory parameters, then the most total parameters. A final tie produces MFG007 with the candidate signatures, independently of declaration order. The emitted invocation must also resolve to that constructor unambiguously in C#.
+
+A parameter matches a destination property by exact name first, then by a unique case-insensitive match (`name` can match `Name`). That property supplies the source name, transform and ignore attributes. Without an associated destination property, the parameter matches a public source property by the same name rules. Missing mandatory inputs and ambiguous associations invalidate the candidate. Optional parameters without a source are omitted so the constructor's default is preserved; omitted `params` arguments retain the empty-array behavior. An ignored property's mandatory parameter invalidates the candidate; its optional parameter retains the default.
+
+Construction can be combined with an initializer for remaining properties. A property satisfied by construction is not assigned again, and may have only a getter. Getter-only properties without a construction value or optional default still produce MFG005. Arguments support the same conversions, nullability policy, transforms, nested maps and supported collections as initializers, including maps from direct assembly references.
+
+C# still requires an initializer for each `required` member unless the selected constructor declares `[SetsRequiredMembers]`. Passing the member's value as a constructor argument alone does not satisfy that rule: the generator also emits its required initializer in that case. With `[SetsRequiredMembers]`, the generator trusts the constructor contract and avoids repeating assignments to its associated members. Ignored or absent required members otherwise produce MFG007, including inherited members and fields that cannot be mapped. Fields themselves remain outside the mapping contract. Constructor bodies are not analyzed, and factories, services and reflection setters are not generated.
 
 ### Mapping across projects
 
@@ -218,9 +241,9 @@ Imported entries must have public accessible closed types and a public static no
 | MFG002 | Warning | No matching source property; rename or ignore the destination property. |
 | MFG003 | Error | Incompatible property types; provide a supported nested map or transform. |
 | MFG004 | Error | Missing, invalid, or ambiguous transform method. |
-| MFG005 | Error | Destination property has no accessible setter. |
+| MFG005 | Error | Destination property is not satisfied by construction and has no accessible setter. |
 | MFG006 | Error | Unsupported type shape, accessibility, reserved name, or signature conflict. |
-| MFG007 | Error | Destination cannot be constructed without arguments or has an unfulfilled required member. |
+| MFG007 | Error | No valid accessible constructor, ambiguous constructor/parameter association, ambiguous invocation after optional arguments are omitted, or an unfulfilled required member. |
 | MFG008 | Error | Nullable input cannot satisfy a non-nullable destination contract. |
 | MFG011 | Error | A required external map has an unsupported version, malformed metadata, or an incompatible public `From` signature. Regenerate the library with a compatible MapperForge contract. |
 | MFG012 | Error | Inherited interface property declarations are incompatible. |
@@ -288,7 +311,6 @@ The benchmark compares generated `From` mapping with equivalent manual assignmen
 
 ## Planned work
 
-- Map constructor arguments and positional records.
 - Expand collection conversion and materialization.
 - Validate mapping dependencies and reject recursive graphs.
 - Add SDK compatibility tracking, analyzer release tracking, and code fixes.

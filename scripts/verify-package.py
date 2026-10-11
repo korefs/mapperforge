@@ -12,7 +12,7 @@ import xml.etree.ElementTree as ET
 
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "1.0.0-stage3-validation"
+VERSION = "1.0.0-stage4-validation"
 
 
 def run(args, cwd, env, expect_failure=False, expected_error="MapperForge generator assembly is missing"):

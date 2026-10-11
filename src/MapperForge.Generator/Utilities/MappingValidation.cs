@@ -85,31 +85,28 @@ internal static class MappingValidation
         _ => false
     };
 
-    public static IMethodSymbol? FindConstructor(Compilation compilation, MappingRequest request,
-        ImmutableArray<Diagnostic>.Builder diagnostics)
+    public static bool CanInvokeConstructor(Compilation compilation, MappingRequest request, ConstructionPlan construction)
     {
+        // Bind typed placeholders so overload resolution checks the emitted argument
+        // shape without needing the not-yet-generated nested From methods.
         var declarations = request.DestinationType.DeclaringSyntaxReferences
             .Select(static reference => (TypeDeclarationSyntax)reference.GetSyntax()).ToArray();
         var declaration = declarations.FirstOrDefault(static syntax => syntax.Members.OfType<ConstructorDeclarationSyntax>()
             .Any(static constructor => constructor.Body is not null || constructor.ExpressionBody is not null)) ?? declarations[0];
-        var expression = SyntaxFactory.ParseExpression("new " + request.DestinationType.ToDisplayString(SymbolUtilities.FullyQualifiedNullableFormat) + "()");
-        var position = declaration.CloseBraceToken.IsMissing || declaration.CloseBraceToken.RawKind == 0
-            ? declaration.Identifier.Span.End : declaration.CloseBraceToken.SpanStart;
-        var constructorSyntax = declaration.Members.OfType<ConstructorDeclarationSyntax>()
+        var body = declaration.Members.OfType<ConstructorDeclarationSyntax>()
             .FirstOrDefault(static constructor => constructor.Body is not null || constructor.ExpressionBody is not null);
-        if (constructorSyntax is not null)
-            position = constructorSyntax.Body?.OpenBraceToken.Span.End ?? constructorSyntax.ExpressionBody!.Expression.SpanStart;
+        var position = body?.Body?.OpenBraceToken.Span.End ?? body?.ExpressionBody?.Expression.SpanStart ??
+            (declaration.CloseBraceToken.IsMissing || declaration.CloseBraceToken.RawKind == 0
+                ? declaration.Identifier.Span.End : declaration.CloseBraceToken.SpanStart);
+        var arguments = string.Join(", ", construction.Arguments.Select(static (argument, index) =>
+            (argument.Parameter.Ordinal == index ? "" : SymbolUtilities.EscapeIdentifier(argument.Parameter.Name) + ": ") + "default(" +
+            argument.Parameter.Type.ToDisplayString(SymbolUtilities.FullyQualifiedNullableFormat) + ")"));
+        var expression = SyntaxFactory.ParseExpression("new " +
+            request.DestinationType.ToDisplayString(SymbolUtilities.FullyQualifiedNullableFormat) + "(" + arguments + ")");
         var info = compilation.GetSemanticModel(declaration.SyntaxTree)
             .GetSpeculativeSymbolInfo(position, expression, SpeculativeBindingOption.BindAsExpression);
-        if (info.Symbol is IMethodSymbol constructor) return constructor;
-        if (info.CandidateSymbols.Length == 1 && info.CandidateSymbols[0] is IMethodSymbol candidate &&
-            candidate.Parameters.All(static parameter => parameter.IsOptional || parameter.IsParams) &&
-            compilation.IsSymbolAccessibleWithin(candidate, request.DestinationType)) return candidate;
-
-        diagnostics.Add(Diagnostic.Create(MapperForgeDiagnostics.InvalidConstruction,
-            request.Location ?? SymbolUtilities.GetLocation(request.DestinationType),
-            request.DestinationType.ToDisplayString(), "no accessible, unambiguous constructor can be invoked without arguments"));
-        return null;
+        return SymbolEqualityComparer.Default.Equals(info.Symbol, construction.Constructor) ||
+            info.CandidateSymbols.Length == 1 && SymbolEqualityComparer.Default.Equals(info.CandidateSymbols[0], construction.Constructor);
     }
 
     public static void ValidateRequired(MappingRequest request, IMethodSymbol? constructor,
